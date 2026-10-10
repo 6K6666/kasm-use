@@ -56,6 +56,7 @@ MCP client are the most useful details.
 | `kasm_start` | Start a workspace (e.g. `Chrome`); returns once the session is running |
 | `kasm_look` | Live screenshot of the session, returned as an image (~1 s) |
 | `kasm_click` | Click at x,y in the latest screenshot's coordinates |
+| `kasm_drag` | Drag from one point to another with the button held (menus, windows, sliders, drag and drop) |
 | `kasm_type` | Type text into the focused field |
 | `kasm_key` | Keys/shortcuts, e.g. `ctrl+l`, `Return`, `Tab` |
 | `kasm_scroll` | Scroll, optionally at a point |
@@ -174,7 +175,7 @@ So the boundary is kasm-use itself:
 - **Every tool only acts on sessions this kasm-use process started.** Any other `session_id` (yours,
   another user's, one from before a restart) is refused, including for `kasm_look` and `kasm_stop`.
   `kasm_list` only shows kasm-use's own sessions.
-- **The model never sees the API key or any token**, only the eight tools.
+- **The model never sees the API key or any token**, only the nine tools.
 - **No exec, no screenshot API.** kasm-use doesn't use Kasm's exec API (which can run commands in a
   session as root) or its screenshot API, so it doesn't need those permissions.
 

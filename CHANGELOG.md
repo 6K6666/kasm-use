@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **`kasm_drag`**: press at one point, move with the button held, release at another. For
+  dragging menu items, tabs and windows, moving sliders, selecting text, and drag and drop. It
+  moves in small steps with short pauses at each end, since many toolkits ignore a single jump.
+  Verified on Kasm 1.19.0 Chrome: selecting a line of text and reordering tabs.
+
 ## 0.3.1 — 2026-10-02
 
 - Listed in the official MCP Registry as `io.github.rchurro/kasm-use` (`server.json`; releases

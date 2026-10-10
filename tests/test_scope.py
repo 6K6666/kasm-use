@@ -28,6 +28,7 @@ FOREIGN = "1b1a2009-c172-439f-9c0a-13110a5d9098"
 @pytest.mark.parametrize("tool,args", [
     (tools.kasm_look, {"wait_seconds": 0}),
     (tools.kasm_click, {"x": 1, "y": 1}),
+    (tools.kasm_drag, {"from_x": 1, "from_y": 1, "to_x": 2, "to_y": 2}),
     (tools.kasm_type, {"text": "hi"}),
     (tools.kasm_key, {"keys": "Return"}),
     (tools.kasm_scroll, {}),

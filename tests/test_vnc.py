@@ -41,3 +41,17 @@ def test_pointer_message_is_kasmvnc_11_bytes():
     s.ws = type("W", (), {"send": lambda self, b: sent.append(b)})()
     s.pointer(5, 6, 1)
     assert len(sent[0]) == 11 and struct.unpack(">BHHHhh", sent[0]) == (5, 1, 5, 6, 0, 0)
+
+
+def test_drag_holds_button_while_moving_then_releases(monkeypatch):
+    monkeypatch.setattr(vnc.time, "sleep", lambda s: None)
+    sent = []
+    s = vnc.Session.__new__(vnc.Session)
+    s.width, s.height = 100, 100
+    s.ws = type("W", (), {"send": lambda self, b: sent.append(struct.unpack(">BHHHhh", b))})()
+    s.drag(10, 10, 50, 30, steps=4)
+    assert sent[0][1:4] == (0, 10, 10)                       # move to start, no button
+    assert sent[1][1:4] == (1, 10, 10)                       # press at start
+    assert [m[1] for m in sent[2:-1]] == [1, 1, 1, 1]        # held through every step
+    assert sent[-2][2:4] == (50, 30)                         # last step reaches the target
+    assert sent[-1][1:4] == (0, 50, 30)                      # release at the target

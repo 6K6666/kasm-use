@@ -399,6 +399,22 @@ class Session:
             self.pointer(x, y, 0)
             time.sleep(0.08)
 
+    def drag(self, x1: int, y1: int, x2: int, y2: int, button: int = 1, steps: int = 12) -> None:
+        # Press, pause, move in small steps, pause, release. Toolkits only start a drag after
+        # the pointer moves past a threshold while held, and many ignore a single jump, so the
+        # intermediate motion events and pauses are what make menus, sliders and windows follow.
+        mask = 1 << (button - 1)
+        self.pointer(x1, y1)
+        time.sleep(0.05)
+        self.pointer(x1, y1, mask)
+        time.sleep(0.15)
+        for i in range(1, steps + 1):
+            self.pointer(x1 + (x2 - x1) * i // steps, y1 + (y2 - y1) * i // steps, mask)
+            time.sleep(0.03)
+        time.sleep(0.15)
+        self.pointer(x2, y2, 0)
+        time.sleep(0.08)
+
     def scroll(self, x: int, y: int, direction: str, amount: int) -> None:
         button = {"up": 4, "down": 5, "left": 6, "right": 7}[direction]
         self.click(x, y, button, amount)

@@ -178,7 +178,7 @@ def kasm_look(args, **kw):
         with _session(kid) as s:
             png, size = s.screenshot(), (s.width, s.height)
         _LAST_SHOT[kid] = size
-        summary = (f"Screenshot of Kasm session {kid[:8]} ({size[0]}x{size[1]}, live). Give kasm_click / "
+        summary = (f"Screenshot of Kasm session {kid[:8]} ({size[0]}x{size[1]}, live). Give kasm_click / kasm_drag / "
                    f"kasm_scroll coordinates in THIS image's pixels.")
         return {
             "_multimodal": True,
@@ -200,6 +200,19 @@ def kasm_click(args, **kw):
             s.click(*_to_desktop(kid, args["x"], args["y"], s.width, s.height), button,
                     2 if args.get("double") else 1)
         return _ok(session_id=kid, clicked=[args["x"], args["y"]])
+    except Exception as e:
+        return _err(str(e))
+
+
+def kasm_drag(args, **kw):
+    try:
+        kid = _resolve_session(args)
+        button = {"left": 1, "middle": 2, "right": 3}.get(args.get("button", "left"), 1)
+        with _session(kid) as s:
+            start = _to_desktop(kid, args["from_x"], args["from_y"], s.width, s.height)
+            end = _to_desktop(kid, args["to_x"], args["to_y"], s.width, s.height)
+            s.drag(*start, *end, button)
+        return _ok(session_id=kid, dragged=[[args["from_x"], args["from_y"]], [args["to_x"], args["to_y"]]])
     except Exception as e:
         return _err(str(e))
 
@@ -288,6 +301,13 @@ _TOOLS = [
          **_SID, "x": {"type": "integer"}, "y": {"type": "integer"},
          "button": {"type": "string", "enum": ["left", "right", "middle"]},
          "double": {"type": "boolean"}}}),
+    ("kasm_drag", kasm_drag,
+     "Drag with the mouse held down from one point to another, in the coordinate space of the latest "
+     "kasm_look image: move menu items, drag windows or tabs, move sliders, select text, drag and drop.",
+     {"type": "object", "required": ["from_x", "from_y", "to_x", "to_y"], "properties": {
+         **_SID, "from_x": {"type": "integer"}, "from_y": {"type": "integer"},
+         "to_x": {"type": "integer"}, "to_y": {"type": "integer"},
+         "button": {"type": "string", "enum": ["left", "right", "middle"]}}}),
     ("kasm_type", kasm_type,
      "Type text into the focused field of the Kasm session (click the field first). NEVER type passwords, "
      "MFA codes, or payment details — stop and ask the owner to take over the session for those.",
