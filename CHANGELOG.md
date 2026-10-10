@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-10-10
 
 - **`kasm_drag`**: press at one point, move with the button held, release at another. For
   dragging menu items, tabs and windows, moving sliders, selecting text, and drag and drop. It
