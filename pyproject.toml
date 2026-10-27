@@ -28,3 +28,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kasm_use"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]

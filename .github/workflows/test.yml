@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Run desktop MCP tests
-        run: uv run --with pytest --with . pytest -q
+        run: uv run --locked --python ${{ matrix.python }} pytest -q
 
   public-source-audit:
     runs-on: ubuntu-latest
