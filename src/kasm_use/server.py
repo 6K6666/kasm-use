@@ -8,6 +8,7 @@
 import argparse
 import asyncio
 import contextlib
+from copy import deepcopy
 import hmac
 import json
 import os
@@ -20,7 +21,11 @@ from . import __version__, tools
 from .desktop_surface import validated_desktop_handlers
 
 # Do not expose a privileged tool through the shared desktop endpoint.
-HANDLERS = validated_desktop_handlers(tools._TOOLS)
+DESKTOP_REGISTRY = tuple(tools._TOOLS)
+HANDLERS = validated_desktop_handlers(DESKTOP_REGISTRY)
+# Freeze descriptions and schemas as well as callbacks at startup; a later
+# mutation of tools._TOOLS must not alter tools/list on a running MCP server.
+DESKTOP_TOOL_SPECS = tuple((n, d, deepcopy(p)) for n, _, d, p in DESKTOP_REGISTRY)
 
 server = Server("kasm", version=__version__, instructions=(
     "Operate Kasm Workspaces desktops. Typical loop: kasm_start (or reuse a running session "
@@ -31,7 +36,7 @@ server = Server("kasm", version=__version__, instructions=(
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
-    return [types.Tool(name=n, description=d, inputSchema=p) for n, _, d, p in tools._TOOLS]
+    return [types.Tool(name=n, description=d, inputSchema=p) for n, d, p in DESKTOP_TOOL_SPECS]
 
 
 @server.call_tool()
