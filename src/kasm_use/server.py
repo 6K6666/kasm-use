@@ -17,8 +17,10 @@ from mcp import types
 from mcp.server.lowlevel import Server
 
 from . import __version__, tools
+from .desktop_surface import validated_desktop_handlers
 
-HANDLERS = {name: fn for name, fn, _, _ in tools._TOOLS}
+# Do not expose a privileged tool through the shared desktop endpoint.
+HANDLERS = validated_desktop_handlers(tools._TOOLS)
 
 server = Server("kasm", version=__version__, instructions=(
     "Operate Kasm Workspaces desktops. Typical loop: kasm_start (or reuse a running session "
