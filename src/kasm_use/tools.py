@@ -331,7 +331,11 @@ def _available() -> bool:
 
 def register(ctx) -> None:
     """Hermes Agent plugin entry point (see hermes-plugin/)."""
-    for name, handler, description, params in _TOOLS:
+    # Validate this separate registration route before exposing callbacks.
+    from .desktop_surface import validated_desktop_handlers
+    reviewed_tools = tuple(_TOOLS)
+    validated_desktop_handlers(reviewed_tools)
+    for name, handler, description, params in reviewed_tools:
         ctx.register_tool(
             name=name, toolset=TOOLSET,
             schema={"name": name, "description": description, "parameters": params},
