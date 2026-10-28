@@ -7,7 +7,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "rchurro" }]
 requires-python = ">=3.10"
-dependencies = ["mcp>=1.9,<2"]
+dependencies = ["mcp>=1.30,<2"]
 keywords = ["mcp", "kasm", "kasm-workspaces", "computer-use", "ai-agent", "hermes"]
 classifiers = [
   "Programming Language :: Python :: 3",

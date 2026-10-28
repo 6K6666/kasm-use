@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -92,3 +93,26 @@ def test_returned_schema_mutation_does_not_affect_later_tools_list():
     # server's startup-reviewed schema snapshot or subsequent responses.
     second = asyncio.run(server.list_tools())
     assert 'injected_field' not in second[0].inputSchema['properties']
+
+
+def test_mcp_client_discovery_and_wrong_endpoint_denial(monkeypatch):
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    def no_kasm_call(*args, **kwargs):
+        pytest.fail("wrong-endpoint calls must not contact Kasm")
+
+    monkeypatch.setattr(tools, "_call", no_kasm_call)
+
+    async def check():
+        async with create_connected_server_and_client_session(
+            server.server, read_timeout_seconds=timedelta(seconds=5)
+        ) as client:
+            discovered = await client.list_tools()
+            assert tuple(tool.name for tool in discovered.tools) == NAMES
+            for name in ("kasm_exec_grant", "kasm_exec_revoke", "kasm_exec_run",
+                         "kasm_exec_read", "kasm_exec_write", "host_exec",
+                         "kasm_profile_plan", "kasm_archive_inspect"):
+                result = await client.call_tool(name, {})
+                assert result.isError, name
+
+    asyncio.run(check())
