@@ -51,7 +51,7 @@ def test_public_boundary_files_do_not_contain_private_topology():
     reviewed = [ROOT / "docs" / "MAINTAINER_ARCHITECTURE.md",
                 PKG / "desktop_surface.py",
                 ROOT / "tests" / "test_desktop_surface.py"]
-    ipv4 = re.compile(r"(?<![\\w.])(?:\\d{1,3}\\.){3}\\d{1,3}(?![\\w.])")
+    ipv4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
     for path in reviewed:
         text = path.read_text(encoding="utf-8")
         assert ".ts.net" not in text, path
