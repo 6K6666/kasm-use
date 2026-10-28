@@ -10,22 +10,39 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.10", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - name: Run desktop MCP tests
+      - name: Compile source and tests
+        run: uv run --locked --python ${{ matrix.python }} python -m compileall -q src/kasm_use tests
+      - name: Test desktop and static security boundaries
         run: uv run --locked --python ${{ matrix.python }} pytest -q
+      - name: Test minimum supported MCP version
+        if: matrix.python == '3.10'
+        run: uv run --isolated --python 3.10 --with 'mcp==1.30.0' --with pytest --with . pytest -q
+      - name: Export locked runtime dependencies
+        run: uv export --locked --no-dev --no-emit-project --format requirements-txt --output-file runtime-requirements.txt > /dev/null
+      - name: Audit runtime dependencies
+        run: uvx --python ${{ matrix.python }} pip-audit==2.10.1 -r runtime-requirements.txt --disable-pip
+      - name: Build wheel and source distribution
+        run: uv build
 
   public-source-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Scan reachable Git history for high-confidence secrets and private IPs
         run: python3 scripts/scan_public_history.py
