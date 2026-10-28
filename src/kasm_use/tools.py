@@ -166,9 +166,17 @@ def kasm_list(args, **kw):
 def kasm_start(args, **kw):
     workspace = args.get("workspace") or "Chrome"
     try:
+        # Persistent profiles are opt-in per request on Kasm 1.19. Never
+        # expose Reset: it can delete an existing profile and SSH keys.
+        mode = args.get("persistent_profile_mode")
+        if mode not in (None, "Enabled", "Disabled"):
+            return _err("persistent_profile_mode must be Enabled or Disabled")
         images = _call("get_images").get("images", [])
         img = _resolve_workspace(images, workspace)
-        started = _call("request_kasm", image_id=img["image_id"], user_id=_user(), enable_sharing=False)
+        request = {"image_id": img["image_id"], "user_id": _user(), "enable_sharing": False}
+        if mode is not None:
+            request["persistent_profile_mode"] = mode
+        started = _call("request_kasm", **request)
         kid = _kid(started["kasm_id"])
         if not (started.get("session_token") and started.get("username")):
             try:  # don't leave an uncontrollable session running
@@ -313,7 +321,14 @@ _TOOLS = [
     ("kasm_start", kasm_start,
      "Start a Kasm workspace session (e.g. 'Chrome', 'Terminal') as the owner, so they can watch it. "
      "Returns once the session is running; then call kasm_look. Only sessions you start can be controlled.",
-     {"type": "object", "properties": {"workspace": {"type": "string", "description": "Workspace name, e.g. Chrome"}}}),
+     {"type": "object", "properties": {
+         "workspace": {"type": "string", "description": "Workspace name, e.g. Chrome"},
+         "persistent_profile_mode": {
+             "type": "string", "enum": ["Enabled", "Disabled"],
+             "description": "Explicitly enable or disable a workspace persistent profile at launch. "
+                            "Defaults to Kasm policy. Reset is intentionally not supported."
+         }
+     }}),
     ("kasm_look", kasm_look,
      "Live screenshot of your Kasm session. Always look before clicking, and look again after "
      "each action to confirm it worked.",
