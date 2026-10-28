@@ -18,21 +18,46 @@ FORBIDDEN_IMPORT_ROOTS = {
 FORBIDDEN_OS_CALLS = {"system", "popen", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe"}
 
 
+def _check_desktop_ast(tree: ast.AST, source: str) -> None:
+    """Fail on privileged imports and os shell calls, including aliased imports."""
+    os_aliases = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name.split(".")[0] not in FORBIDDEN_IMPORT_ROOTS, (source, alias.name)
+                if alias.name == "os":
+                    os_aliases.add(alias.asname or "os")
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            assert root not in FORBIDDEN_IMPORT_ROOTS, (source, node.module)
+            if node.module == "os":
+                for alias in node.names:
+                    assert alias.name not in FORBIDDEN_OS_CALLS, (source, alias.name)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            receiver = node.func.value
+            if isinstance(receiver, ast.Name) and receiver.id in os_aliases:
+                assert node.func.attr not in FORBIDDEN_OS_CALLS, (source, receiver.id, node.func.attr)
+
+
 def test_desktop_package_has_no_privileged_imports_or_os_shell_calls():
-    for path in sorted(PKG.glob("*.py")):
+    for path in sorted(PKG.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                names = [node.module or ""]
-            else:
-                names = []
-            for name in names:
-                assert name.split(".")[0] not in FORBIDDEN_IMPORT_ROOTS, (path.name, name)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                if isinstance(node.func.value, ast.Name) and node.func.value.id == "os":
-                    assert node.func.attr not in FORBIDDEN_OS_CALLS, (path.name, node.func.attr)
+        _check_desktop_ast(tree, str(path.relative_to(ROOT)))
+
+
+def test_static_guard_catches_aliases_and_direct_os_shell_imports():
+    import pytest
+
+    for source in (
+        "import os as shell\nshell.system('test')",
+        "from os import system as shell\nshell('test')",
+        "from os import popen",
+        "import subprocess as subprocess_alias",
+    ):
+        with pytest.raises(AssertionError):
+            _check_desktop_ast(ast.parse(source), "synthetic")
+    _check_desktop_ast(ast.parse("import os as safe\nsafe.path.exists('test')"), "synthetic")
 
 
 def test_server_uses_validated_desktop_registry():
