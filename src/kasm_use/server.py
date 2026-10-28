@@ -36,7 +36,7 @@ server = Server("kasm", version=__version__, instructions=(
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
-    return [types.Tool(name=n, description=d, inputSchema=p) for n, d, p in DESKTOP_TOOL_SPECS]
+    return [types.Tool(name=n, description=d, inputSchema=deepcopy(p)) for n, d, p in DESKTOP_TOOL_SPECS]
 
 
 @server.call_tool()
