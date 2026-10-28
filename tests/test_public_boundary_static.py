@@ -105,18 +105,18 @@ def test_static_guard_catches_literal_dynamic_imports_and_getattr_shell():
 
     blocked = (
         "__import__('subprocess')",
-        "import importlib as loader\\nloader.import_module('docker')",
-        "from importlib import import_module as load\\nload('paramiko.client')",
-        "import builtins as builtin\\nbuiltin.__import__('ctypes')",
-        "from builtins import __import__ as load\\nload('fabric')",
-        "import os as shell\\ngetattr(shell, 'system')('echo test')",
+        "import importlib as loader\nloader.import_module('docker')",
+        "from importlib import import_module as load\nload('paramiko.client')",
+        "import builtins as builtin\nbuiltin.__import__('ctypes')",
+        "from builtins import __import__ as load\nload('fabric')",
+        "import os as shell\ngetattr(shell, 'system')('echo test')",
     )
     for source in blocked:
         with pytest.raises(AssertionError):
             _check_desktop_ast(ast.parse(source), "synthetic")
     for source in (
-        "import importlib as loader\\nloader.import_module('json')",
-        "import os as safe\\ngetattr(safe, 'getcwd')()",
+        "import importlib as loader\nloader.import_module('json')",
+        "import os as safe\ngetattr(safe, 'getcwd')()",
     ):
         _check_desktop_ast(ast.parse(source), "synthetic")
 
