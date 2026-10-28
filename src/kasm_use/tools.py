@@ -118,6 +118,33 @@ def _to_desktop(kid: str, x, y, width: int, height: int) -> tuple[int, int]:
     return x * width // w, y * height // h
 
 
+def _resolve_workspace(images, requested):
+    """Pick a Kasm workspace by exact friendly name before any partial match.
+
+    Same-name image versions retain the original newest-tag preference.
+    A partial name is accepted only when it resolves to ONE friendly name;
+    never silently choose an unrelated image or ambiguous substring.
+    """
+    if not isinstance(requested, str) or not requested.strip():
+        raise ValueError("Workspace name must be a nonempty string")
+    wanted = requested.strip().casefold()
+    enabled = [i for i in images if i.get("enabled")
+               and isinstance(i.get("friendly_name"), str)
+               and i.get("friendly_name").strip()]
+    exact = [i for i in enabled if i["friendly_name"].strip().casefold() == wanted]
+    if exact:
+        return sorted(exact, key=lambda i: i.get("name") or "")[-1]
+    partial = [i for i in enabled if wanted in i["friendly_name"].casefold()]
+    distinct = {i["friendly_name"].strip().casefold() for i in partial}
+    if len(distinct) > 1:
+        names = sorted({i["friendly_name"] for i in partial})
+        raise ValueError("Ambiguous workspace name; use an exact name: " + ", ".join(names))
+    if not partial:
+        names = sorted({i["friendly_name"] for i in enabled})
+        raise ValueError("No matching workspace. Available: " + ", ".join(names))
+    return sorted(partial, key=lambda i: i.get("name") or "")[-1]
+
+
 # --------------------------------------------------------------------------------- tools
 def kasm_list(args, **kw):
     try:
@@ -137,15 +164,10 @@ def kasm_list(args, **kw):
 
 
 def kasm_start(args, **kw):
-    workspace = (args.get("workspace") or "Chrome").strip().lower()
+    workspace = args.get("workspace") or "Chrome"
     try:
-        images = [i for i in _call("get_images").get("images", []) if i.get("enabled")]
-        matches = [i for i in images if workspace in (i.get("friendly_name") or "").lower()]
-        if not matches:
-            return _err(f"No workspace matching {workspace!r}. Available: "
-                        + ", ".join(sorted({i.get('friendly_name') for i in images})))
-        # Prefer the newest image tag when the same workspace exists more than once.
-        img = sorted(matches, key=lambda i: i.get("name") or "")[-1]
+        images = _call("get_images").get("images", [])
+        img = _resolve_workspace(images, workspace)
         started = _call("request_kasm", image_id=img["image_id"], user_id=_user(), enable_sharing=False)
         kid = _kid(started["kasm_id"])
         if not (started.get("session_token") and started.get("username")):
