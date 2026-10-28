@@ -83,3 +83,12 @@ def test_advertised_metadata_is_frozen_from_source_schema_mutation():
         assert "rogue" not in advertised[0].inputSchema["properties"]
     finally:
         schema["properties"].pop("rogue", None)
+
+def test_returned_schema_mutation_does_not_affect_later_tools_list():
+    first = asyncio.run(server.list_tools())
+    assert 'injected_field' not in first[0].inputSchema['properties']
+    first[0].inputSchema['properties']['injected_field'] = {'type': 'string'}
+    # A caller modifying its own returned metadata must never mutate the
+    # server's startup-reviewed schema snapshot or subsequent responses.
+    second = asyncio.run(server.list_tools())
+    assert 'injected_field' not in second[0].inputSchema['properties']
