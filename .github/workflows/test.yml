@@ -4,15 +4,25 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.10", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv run --with pytest --with . pytest -q
+      - name: Compile source and tests
+        run: uv run --with pytest --with . python -m compileall -q src/kasm_use tests
+      - name: Test desktop and static security boundaries
+        run: uv run --with pytest --with . pytest -q
