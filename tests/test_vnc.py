@@ -1,6 +1,7 @@
 """Offline checks for the built-in VNC pieces."""
 import struct
-import zlib
+
+import pytest
 
 from kasm_use import vnc
 
@@ -41,6 +42,56 @@ def test_pointer_message_is_kasmvnc_11_bytes():
     s.ws = type("W", (), {"send": lambda self, b: sent.append(b)})()
     s.pointer(5, 6, 1)
     assert len(sent[0]) == 11 and struct.unpack(">BHHHhh", sent[0]) == (5, 1, 5, 6, 0, 0)
+
+
+def test_failed_authentication_closes_websocket(monkeypatch):
+    class RejectingWebSocket:
+        def __init__(self, *_args):
+            self.responses = [b"RFB 003.008\n", b"\x01", b"\x01", b"\0\0\0\1"]
+            self.closed = False
+
+        def read(self, _length):
+            return self.responses.pop(0)
+
+        def send(self, _data):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    socket = RejectingWebSocket()
+    monkeypatch.setattr(vnc, "_WebSocket", lambda *_args: socket)
+
+    with pytest.raises(PermissionError, match="authentication rejected"):
+        vnc.Session("https://kasm.invalid", "desktop/sid/vnc", "alice", "stale", None)
+
+    assert socket.closed
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_http_auth_rejection_closes_websocket(monkeypatch, status_code):
+    class HandshakeSocket:
+        def __init__(self):
+            self.response = f"HTTP/1.1 {status_code} Rejected\r\nContent-Length: 0\r\n\r\n".encode()
+            self.closed = False
+
+        def sendall(self, _data):
+            pass
+
+        def recv(self, _size):
+            response, self.response = self.response, b""
+            return response
+
+        def close(self):
+            self.closed = True
+
+    sock = HandshakeSocket()
+    monkeypatch.setattr(vnc.socket, "create_connection", lambda *_args, **_kwargs: sock)
+
+    with pytest.raises(vnc.AuthenticationError, match=str(status_code)):
+        vnc._WebSocket("ws://kasm.invalid/desktop/sid/vnc/websockify", {}, None)
+
+    assert sock.closed
 
 
 def test_drag_holds_button_while_moving_then_releases(monkeypatch):

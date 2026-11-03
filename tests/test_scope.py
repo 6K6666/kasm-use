@@ -14,12 +14,17 @@ from kasm_use import tools
 
 @pytest.fixture(autouse=True)
 def clean(monkeypatch):
+    monkeypatch.delenv("KASM_SESSION_STATE_FILE", raising=False)
     tools._SESSIONS.clear()
     tools._LAST_SHOT.clear()
+    tools._STATE_LOADED = False
+    tools._STATE_PATH = None
     calls = []
     monkeypatch.setattr(tools, "_call", lambda ep, **kw: calls.append((ep, kw)) or {})
     monkeypatch.setattr(tools, "_session", lambda kid: pytest.fail("must not open VNC for a foreign session"))
     yield calls
+    tools._STATE_LOADED = False
+    tools._STATE_PATH = None
 
 
 FOREIGN = "1b1a2009-c172-439f-9c0a-13110a5d9098"
@@ -36,7 +41,7 @@ FOREIGN = "1b1a2009-c172-439f-9c0a-13110a5d9098"
 ])
 def test_foreign_session_refused(clean, tool, args):
     out = json.loads(tool({**args, "session_id": FOREIGN}))
-    assert out["ok"] is False and "only controls sessions it started" in out["error"]
+    assert out["ok"] is False and "only controls sessions tracked" in out["error"]
     assert not any(ep == "destroy_kasm" for ep, _ in clean)  # nothing was stopped
 
 

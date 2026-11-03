@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import base64
 import os
-import zlib
 import socket
 import ssl
 import struct
 import time
 import urllib.parse
+import zlib
+
 
 # ----------------------------------------------------------------------------- websocket
 class _WebSocket:
@@ -34,18 +35,32 @@ class _WebSocket:
                  f"Host: {u.hostname}", "Upgrade: websocket", "Connection: Upgrade",
                  f"Sec-WebSocket-Key: {key}", "Sec-WebSocket-Version: 13",
                  "Sec-WebSocket-Protocol: binary"] + [f"{k}: {v}" for k, v in headers.items()]
-        self.sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
-        resp = b""
-        while b"\r\n\r\n" not in resp:
-            chunk = self.sock.recv(4096)
-            if not chunk:
-                raise ConnectionError("websocket handshake: connection closed")
-            resp += chunk
-        head, rest = resp.split(b"\r\n\r\n", 1)
-        self._pending = bytearray(rest)
-        status = head.split(b"\r\n", 1)[0].decode(errors="replace")
-        if " 101 " not in status + " ":
-            raise ConnectionError(f"websocket handshake failed: {status}")
+        try:
+            self.sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+            resp = b""
+            while b"\r\n\r\n" not in resp:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("websocket handshake: connection closed")
+                resp += chunk
+            head, rest = resp.split(b"\r\n\r\n", 1)
+            self._pending = bytearray(rest)
+            status = head.split(b"\r\n", 1)[0].decode(errors="replace")
+            parts = status.split(" ", 2)
+            try:
+                status_code = int(parts[1])
+            except (IndexError, ValueError):
+                status_code = 0
+            if status_code in (401, 403):
+                raise AuthenticationError(f"websocket handshake authentication rejected ({status_code})")
+            if status_code != 101:
+                raise ConnectionError(f"websocket handshake failed: {status}")
+        except BaseException:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            raise
         self._buf = bytearray()
 
     # Buffers are bytearrays consumed from the front with `del`, which is cheap; slicing bytes
@@ -284,6 +299,10 @@ def _zrle_decode(data: bytes, w: int, h: int) -> bytearray:
 
 
 # ----------------------------------------------------------------------------------- RFB
+class AuthenticationError(PermissionError):
+    """The VNC proxy rejected the supplied Kasm login token."""
+
+
 class Session:
     """One input connection to a Kasm session's desktop. Use as a context manager."""
 
@@ -295,28 +314,35 @@ class Session:
                              {"Cookie": f"username={username}; session_token={session_token}",
                               "Origin": f"https://{host}"}, ctx)
         ws = self.ws
-        if not ws.read(12).startswith(b"RFB "):
-            raise ConnectionError("not a VNC server")
-        ws.send(b"RFB 003.008\n")
-        types = list(ws.read(ws.read(1)[0]))
-        if 1 in types:
-            ws.send(b"\x01")
-        elif 2 in types:
-            ws.send(b"\x02")
-            ws.send(vnc_auth_response(ws.read(16)))
-        else:
-            raise ConnectionError(f"unsupported VNC security types {types}")
-        if struct.unpack(">I", ws.read(4))[0] != 0:
-            raise PermissionError("VNC authentication rejected")
-        ws.send(b"\x01")  # shared: the owner can stay connected while we drive
-        self.width, self.height = struct.unpack(">HH", ws.read(4))
-        ws.read(16)  # server pixel format; we set our own below
-        ws.read(struct.unpack(">I", ws.read(4))[0])  # desktop name
-        # 32bpp little-endian true colour (bytes arrive as B, G, R, X). ZRLE preferred, Raw fallback.
-        ws.send(struct.pack(">B3xBBBBHHHBBB3x", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
-        ws.send(struct.pack(">BxHii", 2, 2, 16, 0))
-        self._bpp = 4
-        self._zlib = zlib.decompressobj()  # ZRLE uses one zlib stream for the whole connection
+        try:
+            if not ws.read(12).startswith(b"RFB "):
+                raise ConnectionError("not a VNC server")
+            ws.send(b"RFB 003.008\n")
+            types = list(ws.read(ws.read(1)[0]))
+            if 1 in types:
+                ws.send(b"\x01")
+            elif 2 in types:
+                ws.send(b"\x02")
+                ws.send(vnc_auth_response(ws.read(16)))
+            else:
+                raise ConnectionError(f"unsupported VNC security types {types}")
+            if struct.unpack(">I", ws.read(4))[0] != 0:
+                raise AuthenticationError("VNC authentication rejected")
+            ws.send(b"\x01")  # shared: the owner can stay connected while we drive
+            self.width, self.height = struct.unpack(">HH", ws.read(4))
+            ws.read(16)  # server pixel format; we set our own below
+            ws.read(struct.unpack(">I", ws.read(4))[0])  # desktop name
+            # 32bpp little-endian true colour (bytes arrive as B, G, R, X). ZRLE preferred, Raw fallback.
+            ws.send(struct.pack(">B3xBBBBHHHBBB3x", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
+            ws.send(struct.pack(">BxHii", 2, 2, 16, 0))
+            self._bpp = 4
+            self._zlib = zlib.decompressobj()  # ZRLE uses one zlib stream for the whole connection
+        except BaseException:
+            try:
+                ws.close()
+            except OSError:
+                pass
+            raise
 
     def __enter__(self):
         return self

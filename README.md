@@ -62,6 +62,8 @@ MCP client are the most useful details.
 | `kasm_scroll` | Scroll, optionally at a point |
 | `kasm_stop` | Destroy the session |
 
+Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, or `kasm_scroll` to return a fresh screenshot with the action result. Inspect the screenshot to decide whether the action worked. If the screenshot is unavailable, the input may still have been sent; call `kasm_look` before retrying.
+
 ## Requirements
 
 - Kasm Workspaces **1.19 or newer** (tested on 1.19.0).
@@ -89,7 +91,10 @@ MCP client are the most useful details.
 | `KASM_API_KEY` / `KASM_API_KEY_SECRET` | yes | the API key pair |
 | `KASM_USER_ID` | yes | the Kasm user sessions are created for |
 | `KASM_VERIFY_TLS` | no | `false` to accept a self-signed Kasm certificate (default `true`) |
+| `KASM_SESSION_STATE_FILE` | no | private JSON file for reconnecting to tracked sessions after a kasm-use restart; stores no login tokens |
 | `KASM_USE_TOKEN` | HTTP only | bearer token clients must send |
+
+For restart recovery, use an absolute path in a directory owned by the kasm-use OS user with mode `0700`. The state file is created as mode `0600`. Use a separate file for each kasm-use process.
 
 ## Run it
 
@@ -172,9 +177,12 @@ Two Kasm facts shape what kasm-use can and can't promise:
 
 So the boundary is kasm-use itself:
 
-- **Every tool only acts on sessions this kasm-use process started.** Any other `session_id` (yours,
-  another user's, one from before a restart) is refused, including for `kasm_look` and `kasm_stop`.
-  `kasm_list` only shows kasm-use's own sessions.
+- **Every tool only acts on sessions this kasm-use instance tracks.** By default, that is sessions
+  started since process start. To recover across restarts, set `KASM_SESSION_STATE_FILE` to a file in
+  an owner-only directory; it records session IDs and display metadata, never login tokens, and is
+  bound to `KASM_USER_ID`. Any other `session_id` is refused, including for `kasm_look` and `kasm_stop`.
+- If VNC rejects a login, kasm-use asks Kasm for a fresh connection URL, checks that it names the
+  same session and owner, then retries the connection once before sending any input.
 - **The model never sees the API key or any token**, only the nine tools.
 - **No exec, no screenshot API.** kasm-use doesn't use Kasm's exec API (which can run commands in a
   session as root) or its screenshot API, so it doesn't need those permissions.
@@ -195,9 +203,10 @@ What that means for you:
 
 ## Limitations
 
-- **Only sessions kasm-use started, and only until it restarts.** The session tokens live in
-  memory. After a restart, earlier sessions keep running in Kasm but kasm-use won't touch them;
-  stop them from the Kasm dashboard.
+- **Restart recovery is opt-in.** Without `KASM_SESSION_STATE_FILE`, sessions from an earlier
+  process remain outside kasm-use's allowlist. With it, kasm-use can recover sessions recorded after
+  Kasm returned their IDs; an interruption before that record is written can still leave a session
+  for you to stop from the Kasm dashboard.
 - **Input reports "sent", not "succeeded".** The next screenshot is the confirmation.
 - **CAPTCHAs, passwords, MFA and payments are handed to you.** The tool descriptions tell the agent
   never to type them; open the session in Kasm and take over.
@@ -217,7 +226,8 @@ The VNC client is built in and uses only the Python standard library.
 - Clicks are given in screenshot pixels and scaled to the desktop's current size, which VNC reports
   on connect — it changes when someone opens the session and Kasm resizes it to their window.
 - Each tool call opens a short VNC connection and does a round trip before closing, so no input
-  is lost on disconnect. The owner can stay connected at the same time.
+  is lost on disconnect. If Kasm rejects an expired login token, kasm-use refreshes it and retries
+  the connection once; it never retries the input action. The owner can stay connected at the same time.
 
 **What this relies on.** None of this is an official Kasm API; it's how Kasm's own web viewer
 connects, observed on Kasm 1.19.0:
