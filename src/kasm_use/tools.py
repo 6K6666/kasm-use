@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import ssl
@@ -174,7 +175,10 @@ def kasm_start(args, **kw):
 def kasm_look(args, **kw):
     try:
         kid = _resolve_session(args)
-        time.sleep(float(args.get("wait_seconds", 2)))
+        delay = float(args.get("wait_seconds", 2))
+        if not math.isfinite(delay):
+            return _err("wait_seconds must be finite")
+        time.sleep(max(0.0, min(delay, 30.0)))
         with _session(kid) as s:
             png, size = s.screenshot(), (s.width, s.height)
         _LAST_SHOT[kid] = size
