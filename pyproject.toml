@@ -15,6 +15,9 @@ classifiers = [
   "Topic :: Desktop Environment",
 ]
 
+[project.optional-dependencies]
+guac = ["playwright>=1.51,<2"]
+
 [project.urls]
 Homepage = "https://github.com/rchurro/kasm-use"
 Issues = "https://github.com/rchurro/kasm-use/issues"

@@ -2,8 +2,8 @@
 
 Shared by the MCP server (kasm_use.server) and the Hermes Agent plugin (register() below).
 
-Eyes and hands are the session's own KasmVNC server, reached through Kasm's proxy (see vnc.py):
-live framebuffer reads for screenshots, VNC pointer/key events for input.
+Container desktops use the KasmVNC proxy. Server Workspaces use the optional
+Guacamole browser transport for screenshots and input.
 
 Scope: every tool acts ONLY on sessions this process started with kasm_start. Two Kasm facts make
 that the important boundary:
@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import vnc
+from . import guac, vnc
 
 TOOLSET = "kasm"
 _REQUIRED_ENV = ["KASM_API_URL", "KASM_API_KEY", "KASM_API_KEY_SECRET", "KASM_USER_ID"]
@@ -159,7 +159,9 @@ def _load_sessions() -> None:
 
         restored = {}
         for entry in entries:
-            if not isinstance(entry, dict) or set(entry) != {"session_id", "username", "workspace", "started"}:
+            if (not isinstance(entry, dict)
+                or set(entry) - {"transport"} != {"session_id", "username", "workspace", "started"}
+                or entry.get("transport", "vnc") not in ("vnc", "guac")):
                 raise RuntimeError("Kasm session state contains invalid session metadata.")
             kid = _kid(entry["session_id"])
             username, workspace, started = entry["username"], entry["workspace"], entry["started"]
@@ -184,6 +186,7 @@ def _load_sessions() -> None:
                 "started": started,
                 "session_token": None,
                 "path": None,
+                **({"transport": "guac"} if entry.get("transport") == "guac" else {}),
             }
 
         with _LOCK:
@@ -205,6 +208,7 @@ def _save_sessions() -> None:
                     "username": creds["username"],
                     "workspace": creds["workspace"],
                     "started": creds["started"],
+                    **({"transport": "guac"} if creds.get("transport") == "guac" else {}),
                 }
                 for kid, creds in _SESSIONS.items()
             ]
@@ -277,8 +281,21 @@ def _resolve_session(args: dict) -> str:
     return max(mine, key=lambda k: _SESSIONS[k]["started"])
 
 
-def _session(kid: str) -> vnc.Session:
+def _session(kid: str) -> vnc.Session | guac.Session:
     creds = _SESSIONS[kid]
+    if creds.get("transport") == "guac":
+        cached_url = creds.get("browser_url")
+        if not cached_url:
+            _refresh_session(kid)
+        verify_tls = _CTX.verify_mode != ssl.CERT_NONE
+        try:
+            return guac.Session(kid, creds["browser_url"], creds["path"], verify_tls)
+        except guac.ConnectionError:
+            if not cached_url:
+                raise
+            # Refresh only while attaching, before a caller can send input.
+            _refresh_session(kid)
+            return guac.Session(kid, creds["browser_url"], creds["path"], verify_tls)
     if not creds.get("path") or not creds.get("session_token"):
         _refresh_session(kid)
     try:
@@ -302,7 +319,8 @@ def _refresh_session(kid: str) -> None:
         raise RuntimeError("Kasm session is not running.")
 
     url = response.get("kasm_url") or ""
-    parts = urllib.parse.urlsplit(url).fragment.strip("/").split("/")
+    parsed = urllib.parse.urlsplit(url)
+    parts = parsed.fragment.strip("/").split("/")
     if (
         len(parts) != 5
         or parts[:2] != ["connect", "kasm"]
@@ -312,6 +330,7 @@ def _refresh_session(kid: str) -> None:
     ):
         raise RuntimeError("Kasm returned a connection link that did not match this session and owner.")
 
+    creds = _SESSIONS[kid]
     path = ((status.get("port_map") or {}).get("vnc") or {}).get("path")
     if not path:
         raise RuntimeError("Kasm did not report a VNC path for this session.")
@@ -319,7 +338,13 @@ def _refresh_session(kid: str) -> None:
     if response_owner and _kid(response_owner) != _kid(_user()):
         raise RuntimeError("Kasm returned a connection link that did not match this session and owner.")
 
-    creds = _SESSIONS[kid]
+    if creds.get("transport") == "guac":
+        relative = path.strip("/").split("/")
+        if (parsed.scheme or parsed.netloc or parsed.path not in ("", "/") or parsed.query
+                or len(relative) != 3 or relative[::2] != ["desktop", "vnc"]
+                or _kid(relative[1]) != kid):
+            raise RuntimeError("Kasm returned a connection link that did not match this session and owner.")
+        creds["browser_url"] = urllib.parse.urljoin(os.environ["KASM_API_URL"], url)
     creds["path"] = path
     creds["session_token"] = parts[4]
 
@@ -368,12 +393,16 @@ def kasm_list(args, **kw):
         running = {_kid(k["kasm_id"]): k.get("operational_status") for k in _call("get_kasms").get("kasms", [])}
         with _LOCK:
             before = len(_SESSIONS)
-            for kid in [k for k in _SESSIONS if k not in running]:  # stopped elsewhere (e.g. dashboard)
+            expired = [k for k in _SESSIONS if k not in running]
+            browsers = [k for k in expired if _SESSIONS[k].get("transport") == "guac"]
+            for kid in expired:  # stopped elsewhere (e.g. dashboard)
                 _SESSIONS.pop(kid, None)
                 _LAST_SHOT.pop(kid, None)
             sessions = [{"session_id": kid, "workspace": s["workspace"], "status": running.get(kid)}
                         for kid, s in _SESSIONS.items()]
             removed = len(_SESSIONS) != before
+        for kid in browsers:
+            guac.close(kid)
         if removed:
             _save_sessions()
         return _ok(workspaces=images, sessions=sessions,
@@ -395,6 +424,15 @@ def kasm_start(args, **kw):
         images = _call("get_images").get("images", [])
         img = _resolve_workspace(images, workspace)
         request = {"image_id": img["image_id"], "user_id": _user(), "enable_sharing": False}
+        transport = "vnc"
+        if img.get("image_type") in ("Server", "Server Pool"):
+            client = img.get("rdp_client_type")
+            if client == "RDP_CLIENT":
+                return _err("This workspace requires native RDP. Enable the Kasm web client for kasm-use.")
+            guac.require_browser()
+            transport = "guac"
+            if client == "USER_SELECT":
+                request["rdp_client_type"] = "GUAC"
         if mode is not None:
             request["persistent_profile_mode"] = mode
         started = _call("request_kasm", **request)
@@ -408,7 +446,7 @@ def kasm_start(args, **kw):
                         "'Users Auth Session' permission), so kasm-use can't control the session.")
         with _LOCK:
             _SESSIONS[kid] = {"username": started["username"], "session_token": started["session_token"],
-                              "workspace": img.get("friendly_name"), "started": time.time()}
+                              "workspace": img.get("friendly_name"), "started": time.time(), "transport": transport}
         try:
             _save_sessions()
         except Exception:
@@ -556,9 +594,11 @@ def kasm_stop(args, **kw):
         kid = _resolve_session(args)
         _call("destroy_kasm", kasm_id=kid, user_id=_user())
         with _LOCK:
-            _SESSIONS.pop(kid, None)
+            stopped = _SESSIONS.pop(kid, {})
             _LAST_SHOT.pop(kid, None)
         _save_sessions()
+        if stopped.get("transport") == "guac":
+            guac.close(kid)
         return _ok(session_id=kid, stopped=True)
     except Exception as e:
         return _err(str(e))

@@ -214,6 +214,23 @@ What that means for you:
 
 ## How it works
 
+### Windows Server Workspaces
+
+Install the optional `kasm-use[guac]` extra and run
+`python -m playwright install chromium` in the same environment. For Docker,
+build with `--build-arg INSTALL_GUAC=1`.
+
+Configure the RDP workspace to use Kasm's web client and supply a per-session
+RDP identity through the Kasm Server configuration. When the client is user
+selectable, `kasm_start` requests Guacamole. The desktop tools open Kasm's
+authenticated browser connection for the exact user and session they track.
+The connection link is kept in memory. If Kasm displays an RDP login form,
+complete login through the owner's Kasm browser. The tools do not collect
+Windows passwords. Horizontal scroll sends Shift+wheel. Use the application's scrollbar if it
+does not support that shortcut.
+
+### Container Workspaces
+
 kasm-use talks to each session's KasmVNC server directly, through Kasm's own proxy
 (`wss://<kasm>/desktop/<id>/vnc/websockify`), with the login token `request_kasm` returns.
 The VNC client is built in and uses only the Python standard library.
