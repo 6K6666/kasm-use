@@ -5,13 +5,15 @@ Shared by the MCP server (kasm_use.server) and the Hermes Agent plugin (register
 Container desktops use the KasmVNC proxy. Server Workspaces use the optional
 Guacamole browser transport for screenshots and input.
 
-Scope: every tool acts ONLY on sessions this process started with kasm_start. Two Kasm facts make
+Scope: tools control tracked sessions only. A configured pilot may explicitly claim its own
+dashboard sessions from one workspace. Two Kasm facts make
 that the important boundary:
 - A Kasm API key is server-wide. With the permissions kasm-use needs it can list, view and stop any
   user's sessions, and "Users Auth Session" lets it log in on behalf of any user.
 - The session_token request_kasm returns is a login token for KASM_USER_ID, not for one session:
   it opens every session that user has.
-So kasm-use never accepts a session it didn't start, never returns tokens or keys to the model, and
+So kasm-use checks the pilot's owner and workspace before requesting a login link,
+never returns tokens or keys to the model, and
 doesn't use Kasm's exec or screenshot APIs at all.
 
 Configuration comes from the environment only:
@@ -210,7 +212,7 @@ def _save_sessions() -> None:
                     "started": creds["started"],
                     **({"transport": "guac"} if creds.get("transport") == "guac" else {}),
                 }
-                for kid, creds in _SESSIONS.items()
+                for kid, creds in _SESSIONS.items() if not creds.get("pilot")
             ]
         payload = {"version": _STATE_VERSION, "user_id": _user(), "sessions": sessions}
         fd, temporary = tempfile.mkstemp(prefix=".sessions-", dir=os.path.dirname(path))
@@ -313,6 +315,10 @@ def _session(kid: str) -> vnc.Session | guac.Session:
 
 def _refresh_session(kid: str) -> None:
     response = _call("get_kasm_status", kasm_id=kid, user_id=_user())
+    _set_connection(kid, _SESSIONS[kid], response)
+
+
+def _set_connection(kid: str, creds: dict, response: dict) -> None:
     status = response.get("kasm") or {}
     operation_status = (status.get("operational_status") or response.get("operational_status") or "").lower()
     if operation_status and operation_status != "running":
@@ -330,7 +336,6 @@ def _refresh_session(kid: str) -> None:
     ):
         raise RuntimeError("Kasm returned a connection link that did not match this session and owner.")
 
-    creds = _SESSIONS[kid]
     path = ((status.get("port_map") or {}).get("vnc") or {}).get("path")
     if not path:
         raise RuntimeError("Kasm did not report a VNC path for this session.")
@@ -338,13 +343,14 @@ def _refresh_session(kid: str) -> None:
     if response_owner and _kid(response_owner) != _kid(_user()):
         raise RuntimeError("Kasm returned a connection link that did not match this session and owner.")
 
-    if creds.get("transport") == "guac":
+    if creds.get("transport") == "guac" or creds.get("pilot"):
         relative = path.strip("/").split("/")
         if (parsed.scheme or parsed.netloc or parsed.path not in ("", "/") or parsed.query
                 or len(relative) != 3 or relative[::2] != ["desktop", "vnc"]
                 or _kid(relative[1]) != kid):
             raise RuntimeError("Kasm returned a connection link that did not match this session and owner.")
-        creds["browser_url"] = urllib.parse.urljoin(os.environ["KASM_API_URL"], url)
+        if creds.get("transport") == "guac":
+            creds["browser_url"] = urllib.parse.urljoin(os.environ["KASM_API_URL"], url)
     creds["path"] = path
     creds["session_token"] = parts[4]
 
@@ -407,6 +413,42 @@ def kasm_list(args, **kw):
             _save_sessions()
         return _ok(workspaces=images, sessions=sessions,
                    note="Only sessions tracked by this kasm-use instance are listed or controllable.")
+    except Exception as e:
+        return _err(str(e))
+
+
+def kasm_claim_pilot(args, **kw):
+    """Explicitly attach to the selected Kasm owner's group-scoped pilot."""
+    try:
+        kid = _kid(args.get("session_id", ""))
+        image = _kid(os.environ.get("KASM_PILOT_WORKSPACE_ID", ""))
+        username = os.environ.get("KASM_PILOT_USERNAME", "")
+        if not re.fullmatch(r"[a-f0-9]{32}", image) or not re.fullmatch(r"[A-Za-z0-9_.@+-]{1,200}", username):
+            return _err("Dashboard pilot attachment is disabled.")
+        if not re.fullmatch(r"[a-f0-9]{32}", kid):
+            return _err("Supply the exact dashboard session ID.")
+        _load_sessions()
+        matches = [row for row in _call("get_kasms").get("kasms", [])
+                   if _kid(row.get("kasm_id", "")) == kid
+                   and _kid(row.get("user_id", "")) == _kid(_user())
+                   and _kid(row.get("image_id", "")) == image
+                   and row.get("operational_status") == "running"]
+        if len(matches) != 1:
+            return _err("No running dashboard pilot matches this session and configured owner.")
+
+        response = _call("get_kasm_status", kasm_id=kid, user_id=_user())
+        row = response.get("kasm") or {}
+        if (_kid(row.get("kasm_id", "")) != kid
+                or _kid(row.get("user_id", "")) != _kid(_user())
+                or _kid(row.get("image_id", "")) != image
+                or row.get("operational_status") != "running"):
+            return _err("Kasm could not confirm the dashboard pilot's identity.")
+        creds = {"username": username, "workspace": "Windows 11 Dockur Pilot", "started": time.time(), "pilot": True}
+        _set_connection(kid, creds, response)
+        with _LOCK:
+            _SESSIONS.setdefault(kid, creds)
+        # A claim is process-local. Restarting this process requires a fresh claim.
+        return _ok(session_id=kid, workspace=creds["workspace"])
     except Exception as e:
         return _err(str(e))
 
@@ -611,6 +653,9 @@ _SID = {"session_id": {"type": "string",
 _TOOLS = [
     ("kasm_list", kasm_list, "List Kasm workspaces you can start, and the sessions you started.",
      {"type": "object", "properties": {}}),
+    ("kasm_claim_pilot", kasm_claim_pilot,
+     "Attach to a running Windows pilot session launched from the dashboard by this instance's configured owner.",
+     {"type": "object", "required": ["session_id"], "properties": _SID}),
     ("kasm_start", kasm_start,
      "Start a Kasm workspace session (e.g. 'Chrome', 'Terminal') as the owner, so they can watch it. "
      "Returns once the session is running; then call kasm_look. Only sessions you start can be controlled.",
