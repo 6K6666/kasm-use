@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1 — 2026-11-26
+
+- **`kasm_start` answers within about a minute.** It used to wait up to five minutes for Kasm to
+  report the session running, then keep trying a desktop it could not reach, which outlasts a
+  public proxy's 100 s limit. It now returns `state: "preparing"` and points to `kasm_wait`.
+  `kasm_wait` reports `preparing` (not `failed`) while Kasm itself is still starting the session.
+
 ## 0.5.0 — 2026-11-26
 
 Fixes from an agent driving Ubuntu and Windows desktops end to end. Nothing here is specific to one

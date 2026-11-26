@@ -79,6 +79,11 @@ _LAST_SHOT: dict[str, tuple[int, int]] = {}
 # Sessions whose desktop has drawn something at least once while this process watched.
 _VISIBLE: set[str] = set()
 START_READY_SECONDS = 20
+# kasm_start answers within this, with state "preparing" when the desktop is not up yet: a public
+# proxy cuts a response at 100 s.
+# shortcut: only the waits between attempts are bounded; one connection attempt already under way
+# may add its 20 s socket timeout. Probe in a thread if a hung desktop ever outlasts the proxy.
+START_BUDGET_SECONDS = 60
 # Kasm destroys a session whose keepalive runs out (one hour by default), and only a viewer's browser
 # renews it. kasm-use renews it for each session it connects to, at most this often.
 KEEPALIVE_SECONDS = 300
@@ -551,12 +556,14 @@ def _screen() -> tuple[int, int] | None:
     return size
 
 
-def _apply_screen(kid: str) -> None:
+def _apply_screen(kid: str, deadline: float = math.inf) -> None:
     """Ask a new desktop for the configured size, once, right after it starts."""
     size = _screen()
     if not size or _SESSIONS[kid].get("transport") == "guac":
         return
     for _ in range(5):
+        if time.monotonic() >= deadline:
+            return
         try:
             with _session(kid) as s:
                 s.set_desktop_size(*size)
@@ -578,14 +585,27 @@ def _shot(kid: str) -> tuple[bytes, tuple[int, int], bool]:
 
 def _wait_visible(kid: str, seconds: float) -> bool:
     """Poll once a second until the desktop has drawn something. False when it never did."""
+    deadline = time.monotonic() + seconds
     for _ in range(max(1, int(seconds))):
         try:
             if not _shot(kid)[2]:
                 return True
         except Exception:
             pass  # a new desktop may refuse connections for its first seconds
+        if time.monotonic() >= deadline:  # a desktop that cannot be reached costs far more than 1 s per try
+            break
         time.sleep(1)
     return False
+
+
+def _starting(kid: str) -> bool:
+    """True while Kasm itself has not finished starting the session."""
+    try:
+        reply = _call("get_kasm_status", kasm_id=kid, user_id=_user())
+    except Exception:
+        return False
+    status = (reply.get("kasm") or {}).get("operational_status") or reply.get("operational_status")
+    return status in ("requested", "provisioning", "assigned", "starting")
 
 
 def _allowed(images: list) -> list:
@@ -694,6 +714,7 @@ def kasm_start(args, **kw):
     workspace = args.get("workspace")
     if not workspace:
         return _err("Give a workspace name from kasm_list.")
+    deadline = time.monotonic() + START_BUDGET_SECONDS
     try:
         _load_sessions()
         _save_sessions()  # fail before allocating a Kasm if configured recovery storage is unusable
@@ -759,19 +780,21 @@ def kasm_start(args, **kw):
             except Exception:
                 pass
             return _err(f"Kasm session {kid} was created but not saved for recovery, so it was destroyed.")
-        for _ in range(60):
-            status = (_call("get_kasm_status", kasm_id=kid, user_id=_user()).get("kasm") or {}).get("operational_status")
-            if status == "running":
-                break
+        waiting = dict(session_id=kid, workspace=img.get("friendly_name"), image=img.get("name"),
+                       state="preparing", ready=False)
+        while (_call("get_kasm_status", kasm_id=kid, user_id=_user()).get("kasm") or {}).get("operational_status") != "running":
+            if time.monotonic() + 5 > deadline:
+                return _ok(**waiting, note="Kasm is still starting this session. Call kasm_wait.")
             time.sleep(5)
-        else:
-            return _err(f"Session {kid} did not reach 'running'.")
-        _apply_screen(kid)
+        _apply_screen(kid, deadline)
         if _status_file(kid):  # whatever prepares this desktop says when it is ready; the viewer's own screen does not
             state = _session_state(kid)["state"]
-        else:
+        elif transport == "guac":
             # shortcut: a Guacamole desktop is reported ready unseen; probing it would open a browser here.
-            state = "ready" if transport == "guac" or _wait_visible(kid, START_READY_SECONDS) else "preparing"
+            state = "ready"
+        else:
+            left = min(START_READY_SECONDS, deadline - time.monotonic())
+            state = "ready" if left > 0 and _wait_visible(kid, left) else "preparing"
         ready = state == "ready"
         return _ok(session_id=kid, workspace=img.get("friendly_name"), image=img.get("name"), state=state, ready=ready,
                    note="Desktop is visible. Call kasm_look next." if ready
@@ -804,6 +827,7 @@ def kasm_wait(args, **kw):
         if not _status_file(kid) and status["state"] == "preparing":
             # Say why, so an agent does not wait forever on a desktop that is gone.
             status = ({"state": "preparing", "detail": "The screen is still blank."} if connected or not unreachable
+                      else {"state": "preparing", "detail": "Kasm is still starting the session."} if _starting(kid)
                       else {"state": "failed", "detail": f"Could not reach the desktop: {unreachable}"})
         return _ok(session_id=kid, state=status["state"], detail=status["detail"], waited_seconds=waited)
     except Exception as e:
