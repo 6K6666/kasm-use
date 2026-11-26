@@ -34,6 +34,8 @@ workspace: every new behaviour is switched on by an optional environment variabl
   session is still the default; with several, the call must pass `session_id`.
 - `kasm_wait` reports `failed` with the reason when a desktop could never be reached, and a status
   file left at `queued` or `preparing` for 15 minutes counts as a dead controller.
+- **Sessions an agent is using no longer expire after an hour.** Each connection renews the Kasm
+  keepalive (at most every five minutes), as an open browser tab would.
 - Messages KasmVNC sends unprompted (another viewer joining or leaving, clipboard contents) are
   skipped instead of ending the call with "unexpected VNC message".
 

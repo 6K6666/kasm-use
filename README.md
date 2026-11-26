@@ -258,6 +258,23 @@ returns the controller's `detail`. A file that is missing, unreadable or malform
 down does not leave an agent waiting forever. `kasm_stop` works in every state. Sessions of every
 other workspace ignore the directory.
 
+### Session lifetime
+
+Kasm destroys a session when its keepalive runs out. Only a viewer's browser tab renews it, so a
+session that just an agent uses would vanish mid-task. Measured on Kasm 1.19.0 on 2026-11-26 with
+the default **Keepalive Expiration of 3600 s** (read from the session's `keepalive_date` and
+`expiration_date`): an Ubuntu session started by the agent and then left alone was gone a few
+minutes after the hour. The group's session time limit could not be read without admin access and
+was not reached in that hour.
+
+kasm-use therefore renews the keepalive whenever a tool connects to a session, at most every five
+minutes per session. It uses the call Kasm's web client makes, `POST /api/keepalive` with the
+session user's login token, the same token it already uses for VNC. Kasm's public
+`/api/public/keepalive` was refused (HTTP 403) for an API key with the permissions listed under
+Requirements, so no extra permission is needed or used. A renewal that fails does not fail the tool
+call; it is tried again on the next one. A session nobody touches for an hour still expires, which
+is what cleans up after an agent that forgets `kasm_stop`.
+
 ### Container Workspaces
 
 kasm-use talks to each session's KasmVNC server directly, through Kasm's own proxy

@@ -78,6 +78,10 @@ _LAST_SHOT: dict[str, tuple[int, int]] = {}
 # Sessions whose desktop has drawn something at least once while this process watched.
 _VISIBLE: set[str] = set()
 START_READY_SECONDS = 20
+# Kasm destroys a session whose keepalive runs out (one hour by default), and only a viewer's browser
+# renews it. kasm-use renews it for each session it connects to, at most this often.
+KEEPALIVE_SECONDS = 300
+_KEPT: dict[str, float] = {}
 STATUS_GRACE_SECONDS = 60  # how long a status-file session may go unreported before it has failed
 STATUS_STALE_SECONDS = 900  # a queued or preparing status nobody has rewritten for this long is a dead controller
 
@@ -96,6 +100,17 @@ def _call(endpoint: str, **payload):
     if isinstance(parsed, dict) and parsed.get("error_message"):
         raise RuntimeError(f"Kasm {endpoint}: {parsed['error_message']}")
     return parsed
+
+
+def _web(endpoint: str, **payload):
+    """A call Kasm's web client makes as the session's own user, with its login token (not the API key)."""
+    req = urllib.request.Request(
+        f"{os.environ['KASM_API_URL'].rstrip('/')}/api/{endpoint}",
+        data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+    try:
+        return json.loads(urllib.request.urlopen(req, timeout=10, context=_CTX).read() or b"{}")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Kasm {endpoint} HTTP {e.code}") from None
 
 
 def _user() -> str:
@@ -412,7 +427,26 @@ def _ready_session(args: dict) -> str:
     return kid
 
 
+def _keepalive(kid: str) -> None:
+    """Renew the session's keepalive the way an open browser tab would. Best effort: a refusal must
+    not fail the caller's action, and it is tried again on the next connection."""
+    creds = _SESSIONS.get(kid) or {}
+    if not creds.get("session_token") or time.monotonic() - _KEPT.get(kid, -KEEPALIVE_SECONDS) < KEEPALIVE_SECONDS:
+        return
+    try:
+        _web("keepalive", kasm_id=kid, token=creds["session_token"], username=creds["username"])
+        _KEPT[kid] = time.monotonic()
+    except Exception:
+        pass
+
+
 def _session(kid: str) -> vnc.Session | guac.Session:
+    session = _connect(kid)
+    _keepalive(kid)
+    return session
+
+
+def _connect(kid: str) -> vnc.Session | guac.Session:
     creds = _SESSIONS[kid]
     if creds.get("transport") == "guac":
         cached_url = creds.get("browser_url")
