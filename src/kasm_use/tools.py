@@ -359,7 +359,10 @@ def _to_desktop(kid: str, x, y, width: int, height: int) -> tuple[int, int]:
     w, h = _LAST_SHOT.get(kid, (0, 0))
     if not w:
         raise RuntimeError("Call kasm_look first so coordinates can be mapped to the screen.")
-    x, y = max(0, min(int(x), w - 1)), max(0, min(int(y), h - 1))
+    x, y = int(x), int(y)
+    if not (0 <= x < w and 0 <= y < h):
+        raise RuntimeError(f"({x}, {y}) is outside the {w}x{h} screenshot. "
+                           "Call kasm_look and use coordinates from that image.")
     return x * width // w, y * height // h
 
 
