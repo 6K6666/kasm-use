@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.0 — 2026-11-26
+
+Fixes from an agent driving Ubuntu and Windows desktops end to end. Nothing here is specific to one
+workspace: every new behaviour is switched on by an optional environment variable.
+
+- **Out-of-range coordinates are refused.** `kasm_click`, `kasm_drag` and `kasm_scroll` used to
+  clamp them silently, so a wrong x clicked something at the edge of the screen. The error names
+  the screenshot size.
+- **`kasm_start` says whether the desktop is ready.** It waits up to 20 s for the first drawn frame
+  and returns `ready` and `state`. `kasm_look` says when the screen is still blank.
+- **`kasm_wait`**, and a status file for slow workspaces. With `KASM_PILOT_WORKSPACE_ID` and
+  `KASM_SESSION_STATUS_DIR`, sessions of that workspace take their state (`queued`, `preparing`,
+  `ready`, `failed`) from `<dir>/<session_id>.json`. Until it is `ready`, `kasm_look` and the input
+  tools refuse with an error that points to `kasm_wait`; a session nobody reports fails after 60 s.
+  `kasm_list` shows each session's state.
+- **`kasm_paste`**: sets the session clipboard (KasmVNC's binary clipboard message) and presses the
+  paste shortcut. Fast, and exact for any characters.
+- **`kasm_type` refuses what a session cannot type.** When the status file says `"typing": "ascii"`,
+  text with other characters is refused, naming them, instead of being typed with holes in it.
+- **Several client processes can share `KASM_SESSION_STATE_FILE`.** Saves take a file lock and
+  merge; every tool call re-reads the file. Before, each process overwrote the others' records.
+  The file gains an optional `image_id` per session; 0.4.0 cannot read a file that has one.
+- **`KASM_USE_SCREEN=WIDTHxHEIGHT`** asks each new desktop for that size. The client now announces
+  ExtendedDesktopSize and follows resizes; on Kasm 1.19 that means a full-frame request is answered
+  with the size alone and the pixels come with the next incremental request.
+- **Key names**: `plus`, `minus`, `equal`, `comma`, `period`, `slash`, `backslash`, `capslock`. The
+  `kasm_key` description and the unknown-key error list every name.
+- **`KASM_WORKSPACE_ALLOW`** limits which workspaces are listed and startable. `kasm_start` has no
+  default workspace any more, and its examples no longer name workspaces you may not have.
+- Messages KasmVNC sends unprompted (another viewer joining or leaving, clipboard contents) are
+  skipped instead of ending the call with "unexpected VNC message".
+
 ## 0.4.0 — 2026-10-10
 
 - **`kasm_drag`**: press at one point, move with the button held, release at another. For
