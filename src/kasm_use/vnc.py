@@ -299,6 +299,11 @@ def _zrle_decode(data: bytes, w: int, h: int) -> bytearray:
 
 
 # ----------------------------------------------------------------------------------- RFB
+def frame_is_blank(rgb: bytes | bytearray) -> bool:
+    """True when every pixel equals the first: a desktop that has not drawn anything yet."""
+    return bytes(rgb) == bytes(rgb[:3]) * (len(rgb) // 3)
+
+
 class AuthenticationError(PermissionError):
     """The VNC proxy rejected the supplied Kasm login token."""
 
@@ -370,6 +375,7 @@ class Session:
             for row in range(h):
                 start = (y + row) * stride + x * 3
                 frame[start:start + w * 3] = rgb[row * w * 3:(row + 1) * w * 3]
+        self.blank = frame_is_blank(frame)
         raw = b"".join(b"\0" + bytes(frame[r * stride:(r + 1) * stride]) for r in range(self.height))
 
         def chunk(kind: bytes, data: bytes) -> bytes:

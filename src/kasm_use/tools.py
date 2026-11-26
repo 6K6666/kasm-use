@@ -59,6 +59,9 @@ _STATE_VERSION = 1
 
 # kasm_id -> (image_width, image_height) of the last screenshot shown to the model.
 _LAST_SHOT: dict[str, tuple[int, int]] = {}
+# Sessions whose desktop has drawn something at least once while this process watched.
+_VISIBLE: set[str] = set()
+START_READY_SECONDS = 20
 
 
 # ----------------------------------------------------------------------------------- API
@@ -366,6 +369,28 @@ def _to_desktop(kid: str, x, y, width: int, height: int) -> tuple[int, int]:
     return x * width // w, y * height // h
 
 
+def _shot(kid: str) -> tuple[bytes, tuple[int, int], bool]:
+    """One live screenshot: PNG, desktop size, and whether the frame was a single flat colour."""
+    with _session(kid) as s:
+        png, size = s.screenshot(), (s.width, s.height)
+        blank = bool(getattr(s, "blank", False))  # the Guacamole transport does not report it
+    if not blank:
+        _VISIBLE.add(kid)
+    return png, size, blank
+
+
+def _wait_visible(kid: str, seconds: float) -> bool:
+    """Poll once a second until the desktop has drawn something. False when it never did."""
+    for _ in range(max(1, int(seconds))):
+        try:
+            if not _shot(kid)[2]:
+                return True
+        except Exception:
+            pass  # a new desktop may refuse connections for its first seconds
+        time.sleep(1)
+    return False
+
+
 def _resolve_workspace(images, requested):
     """Pick a Kasm workspace by exact friendly name before any partial match.
 
@@ -407,6 +432,7 @@ def kasm_list(args, **kw):
             for kid in expired:  # stopped elsewhere (e.g. dashboard)
                 _SESSIONS.pop(kid, None)
                 _LAST_SHOT.pop(kid, None)
+                _VISIBLE.discard(kid)
             sessions = [{"session_id": kid, "workspace": s["workspace"], "status": running.get(kid)}
                         for kid, s in _SESSIONS.items()]
             removed = len(_SESSIONS) != before
@@ -505,6 +531,7 @@ def kasm_start(args, **kw):
             with _LOCK:
                 _SESSIONS.pop(kid, None)
                 _LAST_SHOT.pop(kid, None)
+                _VISIBLE.discard(kid)
             try:
                 _save_sessions()
             except Exception:
@@ -517,8 +544,11 @@ def kasm_start(args, **kw):
             time.sleep(5)
         else:
             return _err(f"Session {kid} did not reach 'running'.")
-        return _ok(session_id=kid, workspace=img.get("friendly_name"), image=img.get("name"),
-                   note="Session is running and visible in the owner's Kasm dashboard. Call kasm_look next.")
+        # shortcut: a Guacamole desktop is reported ready unseen; probing it would open a browser here.
+        ready = transport == "guac" or _wait_visible(kid, START_READY_SECONDS)
+        return _ok(session_id=kid, workspace=img.get("friendly_name"), image=img.get("name"), ready=ready,
+                   note="Desktop is visible. Call kasm_look next." if ready
+                   else "Desktop is still starting. Call kasm_wait.")
     except Exception as e:
         return _err(str(e))
 
@@ -530,11 +560,12 @@ def kasm_look(args, **kw):
         if not math.isfinite(delay):
             return _err("wait_seconds must be finite")
         time.sleep(max(0.0, min(delay, 30.0)))
-        with _session(kid) as s:
-            png, size = s.screenshot(), (s.width, s.height)
+        png, size, blank = _shot(kid)
         _LAST_SHOT[kid] = size
         summary = (f"Screenshot of Kasm session {kid[:8]} ({size[0]}x{size[1]}, live). Give kasm_click / kasm_drag / "
                    f"kasm_scroll coordinates in THIS image's pixels.")
+        if blank:
+            summary += " Screen is blank; the desktop is still starting. Wait and call kasm_look again."
         return {
             "_multimodal": True,
             "content": [
@@ -641,6 +672,7 @@ def kasm_stop(args, **kw):
         with _LOCK:
             stopped = _SESSIONS.pop(kid, {})
             _LAST_SHOT.pop(kid, None)
+            _VISIBLE.discard(kid)
         _save_sessions()
         if stopped.get("transport") == "guac":
             guac.close(kid)
