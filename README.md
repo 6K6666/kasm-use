@@ -95,6 +95,7 @@ Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, 
 | `KASM_VERIFY_TLS` | no | `false` to accept a self-signed Kasm certificate (default `true`) |
 | `KASM_SESSION_STATE_FILE` | no | private JSON file for reconnecting to tracked sessions after a kasm-use restart; stores no login tokens; several client processes may share one file (each save locks it and merges) |
 | `KASM_USE_TOKEN` | HTTP only | bearer token clients must send |
+| `KASM_USE_SCREEN` | no | `WIDTHxHEIGHT` (each 640–2560) asked of every new desktop when it starts, e.g. `1280x800`; unset keeps the image's size (usually 1024x768). A browser that opens the session still resizes it to its window |
 | `KASM_PILOT_WORKSPACE_ID` | no | image ID of one workspace whose desktops are prepared by an outside controller (see [Slow-starting workspaces](#slow-starting-workspaces)) |
 | `KASM_SESSION_STATUS_DIR` | no | directory where that controller publishes `<session_id>.json` for each of that workspace's sessions |
 

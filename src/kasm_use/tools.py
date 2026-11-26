@@ -20,6 +20,7 @@ Configuration comes from the environment only:
   KASM_API_URL, KASM_API_KEY, KASM_API_KEY_SECRET  - a Kasm API key (see README for permissions)
   KASM_USER_ID       - the Kasm user sessions are created for, so the owner can watch/take over
   KASM_VERIFY_TLS    - "false" to accept a self-signed Kasm certificate (default: verify)
+  KASM_USE_SCREEN    - optional WIDTHxHEIGHT asked of each new desktop (default: the image's own size)
   KASM_PILOT_WORKSPACE_ID, KASM_SESSION_STATUS_DIR - optional; sessions of that one workspace
                        take their readiness from <dir>/<session_id>.json, written by whatever
                        prepares the desktop (see README)
@@ -478,6 +479,33 @@ def _to_desktop(kid: str, x, y, width: int, height: int) -> tuple[int, int]:
     return x * width // w, y * height // h
 
 
+def _screen() -> tuple[int, int] | None:
+    """KASM_USE_SCREEN as (width, height), or None when unset."""
+    value = os.environ.get("KASM_USE_SCREEN", "")
+    if not value:
+        return None
+    match = re.fullmatch(r"(\d{3,4})[xX](\d{3,4})", value)
+    size = (int(match[1]), int(match[2])) if match else (0, 0)
+    if not all(640 <= side <= 2560 for side in size):
+        raise ValueError("KASM_USE_SCREEN must be WIDTHxHEIGHT with each side from 640 to 2560, like 1280x800.")
+    return size
+
+
+def _apply_screen(kid: str) -> None:
+    """Ask a new desktop for the configured size, once, right after it starts."""
+    size = _screen()
+    if not size or _SESSIONS[kid].get("transport") == "guac":
+        return
+    for _ in range(5):
+        try:
+            with _session(kid) as s:
+                s.set_desktop_size(*size)
+            return
+        except Exception:
+            time.sleep(1)  # a new desktop may refuse connections for its first seconds
+    # A desktop that never took the size keeps its own; kasm_look reports the real one.
+
+
 def _shot(kid: str) -> tuple[bytes, tuple[int, int], bool]:
     """One live screenshot: PNG, desktop size, and whether the frame was a single flat colour."""
     with _session(kid) as s:
@@ -657,6 +685,7 @@ def kasm_start(args, **kw):
             time.sleep(5)
         else:
             return _err(f"Session {kid} did not reach 'running'.")
+        _apply_screen(kid)
         if _status_file(kid):  # whatever prepares this desktop says when it is ready; the viewer's own screen does not
             state = _session_state(kid)["state"]
         else:

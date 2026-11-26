@@ -59,6 +59,10 @@ def _check_env() -> None:
     missing = [v for v in tools._REQUIRED_ENV if not os.environ.get(v)]
     if missing:
         sys.exit(f"kasm-use: missing environment variables: {', '.join(missing)}")
+    try:
+        tools._screen()
+    except ValueError as e:
+        sys.exit(f"kasm-use: {e}")
 
 
 async def _stdio() -> None:

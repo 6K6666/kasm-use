@@ -339,7 +339,9 @@ class Session:
             ws.read(struct.unpack(">I", ws.read(4))[0])  # desktop name
             # 32bpp little-endian true colour (bytes arrive as B, G, R, X). ZRLE preferred, Raw fallback.
             ws.send(struct.pack(">B3xBBBBHHHBBB3x", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
-            ws.send(struct.pack(">BxHii", 2, 2, 16, 0))
+            # Encodings ZRLE and Raw, plus the ExtendedDesktopSize pseudo-encoding (-308) so the server
+            # reports resizes (ours and the owner's browser's) instead of leaving us with a stale size.
+            ws.send(struct.pack(">BxHiii", 2, 3, 16, 0, -308))
             self._bpp = 4
             self._zlib = zlib.decompressobj()  # ZRLE uses one zlib stream for the whole connection
         except BaseException:
@@ -369,9 +371,20 @@ class Session:
 
     def screenshot(self) -> bytes:
         """The whole desktop as a PNG, read live from the framebuffer."""
+        for _ in range(4):
+            asked = (self.width, self.height)
+            rects = self._update(0, 0, *asked)
+            if not rects and (self.width, self.height) == asked:
+                # KasmVNC, once resize support is announced, answers a full request with the size
+                # alone and marks the area changed; the pixels come with the next incremental request.
+                rects = self._update(0, 0, *asked, incremental=True)
+            if rects and (self.width, self.height) == asked:
+                break  # anything else: the desktop was resized under us, so that frame is the wrong shape
+        else:
+            raise ConnectionError("the desktop kept changing size; call kasm_look again")
         frame = bytearray(self.width * self.height * 3)
         stride = self.width * 3
-        for x, y, w, h, rgb in self._update(0, 0, self.width, self.height):
+        for x, y, w, h, rgb in rects:
             for row in range(h):
                 start = (y + row) * stride + x * 3
                 frame[start:start + w * 3] = rgb[row * w * 3:(row + 1) * w * 3]
@@ -383,16 +396,22 @@ class Session:
         return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", self.width, self.height, 8, 2, 0, 0, 0))
                 + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
-    def _update(self, x: int, y: int, w: int, h: int) -> list:
-        """Request a (non-incremental) framebuffer update; returns rectangles as packed RGB."""
+    def _update(self, x: int, y: int, w: int, h: int, incremental: bool = False) -> list:
+        """Request a framebuffer update; returns its pixel rectangles as packed RGB (none when the
+        server answered with the desktop size alone)."""
         ws = self.ws
-        ws.send(struct.pack(">BBHHHH", 3, 0, x, y, w, h))
+        ws.send(struct.pack(">BBHHHH", 3, incremental, x, y, w, h))
         while True:
             msg = ws.read(1)[0]
             if msg == 0:  # FramebufferUpdate
                 rects = []
                 for _ in range(struct.unpack(">xH", ws.read(3))[0]):
                     rx, ry, rw, rh, enc = struct.unpack(">HHHHi", ws.read(12))
+                    if enc == -308:  # ExtendedDesktopSize: x = reason, y = status (0 = done), w/h = size
+                        ws.read(16 * struct.unpack(">B3x", ws.read(4))[0])  # the screen layout
+                        if ry == 0:
+                            self.width, self.height = rw, rh
+                        continue
                     if enc == 0:
                         px = ws.read(rw * rh * self._bpp)
                         rgb = bytearray(rw * rh * 3)
@@ -410,6 +429,8 @@ class Session:
                 continue
             elif msg == 3:  # ServerCutText
                 ws.read(struct.unpack(">3xI", ws.read(7))[0])
+            elif msg in (253, 254):  # KasmVNC: another viewer joined or left; U32 length, user name
+                ws.read(struct.unpack(">I", ws.read(4))[0])
             elif msg == 180:  # KasmVNC binary clipboard: something in the desktop copied; not ours to read
                 for _ in range(ws.read(1)[0]):
                     ws.read(struct.unpack(">IB", ws.read(5))[1])  # U32 clipboard id, U8 MIME length, MIME
@@ -468,6 +489,10 @@ class Session:
     def set_clipboard(self, text: str) -> None:
         data = text.encode("utf-8")
         self.ws.send(struct.pack(">BBB", 180, 1, 10) + b"text/plain" + struct.pack(">I", len(data)) + data)
+
+    def set_desktop_size(self, width: int, height: int) -> None:
+        """RFB SetDesktopSize for one screen. The server answers with an ExtendedDesktopSize rectangle."""
+        self.ws.send(struct.pack(">BxHHBx", 251, width, height, 1) + struct.pack(">IHHHHI", 0, 0, 0, width, height, 0))
 
     def key(self, sym: int, down: bool) -> None:
         self.ws.send(struct.pack(">BBxxI", 4, 1 if down else 0, sym))
