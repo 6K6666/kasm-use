@@ -43,6 +43,7 @@ import os
 import re
 import ssl
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -82,6 +83,7 @@ START_READY_SECONDS = 20
 # renews it. kasm-use renews it for each session it connects to, at most this often.
 KEEPALIVE_SECONDS = 300
 _KEPT: dict[str, float] = {}
+_KEEPALIVE_WARNED: set[str] = set()
 STATUS_GRACE_SECONDS = 60  # how long a status-file session may go unreported before it has failed
 STATUS_STALE_SECONDS = 900  # a queued or preparing status nobody has rewritten for this long is a dead controller
 
@@ -108,9 +110,12 @@ def _web(endpoint: str, **payload):
         f"{os.environ['KASM_API_URL'].rstrip('/')}/api/{endpoint}",
         data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
     try:
-        return json.loads(urllib.request.urlopen(req, timeout=10, context=_CTX).read() or b"{}")
+        reply = json.loads(urllib.request.urlopen(req, timeout=10, context=_CTX).read() or b"{}")
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Kasm {endpoint} HTTP {e.code}") from None
+        raise RuntimeError(f"Kasm {endpoint} HTTP {e.code}") from None  # never the body: it may echo the token
+    if isinstance(reply, dict) and reply.get("error_message"):
+        raise RuntimeError(f"Kasm {endpoint} was refused")
+    return reply
 
 
 def _user() -> str:
@@ -436,8 +441,13 @@ def _keepalive(kid: str) -> None:
     try:
         _web("keepalive", kasm_id=kid, token=creds["session_token"], username=creds["username"])
         _KEPT[kid] = time.monotonic()
-    except Exception:
-        pass
+    except Exception as e:
+        if kid not in _KEEPALIVE_WARNED:  # once per session, on stderr: the operator's log, never the model
+            _KEEPALIVE_WARNED.add(kid)
+            # Only our own messages are printed; any other exception's text might carry the token.
+            reason = str(e) if type(e) is RuntimeError else type(e).__name__
+            print(f"kasm-use: could not renew the keepalive of session {kid[:8]} ({reason}). "
+                  "Kasm ends a session an hour after its last renewal.", file=sys.stderr, flush=True)
 
 
 def _session(kid: str) -> vnc.Session | guac.Session:

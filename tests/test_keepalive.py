@@ -1,8 +1,12 @@
 """Kasm destroys a session nobody keeps alive (one hour by default). Every connection renews it."""
+import io
 import json
+import socket
+import urllib.error
 
 import pytest
 
+from conftest import REAL_WEB
 from kasm_use import tools
 
 SID = "a" * 32
@@ -72,3 +76,43 @@ def test_a_failed_keepalive_does_not_fail_the_call_and_is_tried_again(kasm, monk
 def test_the_login_token_never_reaches_a_tool_result(kasm):
     result = tools.kasm_key({"session_id": SID, "keys": "Return"}) + json.dumps(tools.kasm_look({"session_id": SID, "wait_seconds": 0}))
     assert "login-token" not in result
+
+
+def test_a_refused_or_unreachable_keepalive_never_fails_the_call_or_leaks_the_token(kasm, monkeypatch, capsys):
+    url = "https://kasm.invalid/api/keepalive"
+    failures = iter([
+        urllib.error.HTTPError(url, 403, "Forbidden", {}, io.BytesIO(b'{"error_message": "bad token login-token"}')),
+        urllib.error.URLError("unreachable while sending login-token"),
+        socket.timeout("timed out"),
+    ])
+    asked = []
+
+    def urlopen(request, **_kwargs):
+        asked.append((request.full_url, json.loads(request.data)))
+        raise next(failures)
+
+    monkeypatch.setattr(tools, "_web", REAL_WEB)
+    monkeypatch.setattr(tools.urllib.request, "urlopen", urlopen)
+    for _ in range(3):
+        result = tools.kasm_key({"session_id": SID, "keys": "Return"})
+        assert json.loads(result)["ok"] is True and "login-token" not in result
+    assert asked == [(url, {"kasm_id": SID, "token": "login-token", "username": "alice"})] * 3
+    warning = capsys.readouterr().err
+    assert warning.count("\n") == 1 and "keepalive" in warning and SID[:8] in warning  # said once per session
+    assert "HTTP 403" in warning and "login-token" not in warning
+
+
+def test_a_reply_carrying_an_error_message_is_a_failed_keepalive(kasm, monkeypatch, capsys):
+    asked = []
+
+    class Reply:
+        def read(self):
+            return b'{"error_message": "Session token login-token is not valid"}'
+
+    monkeypatch.setattr(tools, "_web", REAL_WEB)
+    monkeypatch.setattr(tools.urllib.request, "urlopen", lambda request, **_kw: asked.append(request.full_url) or Reply())
+    for _ in range(2):
+        assert json.loads(tools.kasm_key({"session_id": SID, "keys": "Return"}))["ok"] is True
+    assert len(asked) == 2  # not counted as renewed, so it is tried again
+    warning = capsys.readouterr().err
+    assert "keepalive" in warning and "login-token" not in warning
