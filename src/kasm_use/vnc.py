@@ -410,6 +410,10 @@ class Session:
                 continue
             elif msg == 3:  # ServerCutText
                 ws.read(struct.unpack(">3xI", ws.read(7))[0])
+            elif msg == 180:  # KasmVNC binary clipboard: something in the desktop copied; not ours to read
+                for _ in range(ws.read(1)[0]):
+                    ws.read(struct.unpack(">IB", ws.read(5))[1])  # U32 clipboard id, U8 MIME length, MIME
+                    ws.read(struct.unpack(">I", ws.read(4))[0])
             else:
                 raise ConnectionError(f"unexpected VNC message {msg}")
 
@@ -450,6 +454,20 @@ class Session:
     def scroll(self, x: int, y: int, direction: str, amount: int) -> None:
         button = {"up": 4, "down": 5, "left": 6, "right": 7}[direction]
         self.click(x, y, button, amount)
+
+    # KasmVNC binary clipboard, client to server (noVNC fork core/rfb.js sendBinaryClipboard; server
+    # common/rfb/SMsgReader.cxx readBinaryClipboard):
+    #   U8 message type 180, U8 number of entries, then per entry:
+    #   U8 MIME length (at most 31), MIME bytes, U32 big-endian data length, data.
+    # Text is one "text/plain" entry in UTF-8 with no terminator. The server reads type 180 whatever
+    # encodings were announced, so no pseudo-encoding is needed; it drops the data silently when
+    # clipboard-in is disabled for the session or the data exceeds its limit (DLP_ClipAcceptMax).
+    # The server keeps the data on THIS connection and serves the desktop's paste from it, so the
+    # connection has to stay open until the application has pasted. Server to client, the same
+    # message carries a U32 clipboard id before each entry's MIME length (skipped in _update).
+    def set_clipboard(self, text: str) -> None:
+        data = text.encode("utf-8")
+        self.ws.send(struct.pack(">BBB", 180, 1, 10) + b"text/plain" + struct.pack(">I", len(data)) + data)
 
     def key(self, sym: int, down: bool) -> None:
         self.ws.send(struct.pack(">BBxxI", 4, 1 if down else 0, sym))

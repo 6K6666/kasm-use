@@ -714,6 +714,33 @@ def kasm_type(args, **kw):
 
 
 _KEY_RE = re.compile(r"^[A-Za-z0-9_+]+$")
+PASTE_MAX_BYTES = 65536  # shortcut: KasmVNC drops an oversized clipboard silently, raise if a real paste needs more
+PASTE_SETTLE_SECONDS = 0.5
+
+
+def kasm_paste(args, **kw):
+    text = args.get("text", "")
+    if not text:
+        return _err("text is required")
+    if len(text.encode("utf-8")) > PASTE_MAX_BYTES:
+        return _err(f"text is too large to paste ({PASTE_MAX_BYTES} bytes at most). Paste it in parts.")
+    shortcut = args.get("shortcut") or "ctrl+v"
+    if not _KEY_RE.match(shortcut):
+        return _err("shortcut must be key names joined by +, like ctrl+v or ctrl+shift+v")
+    try:
+        combo = [vnc.keysym(part) for part in shortcut.split("+") if part]
+        kid = _ready_session(args)
+        with _session(kid) as s:
+            if not hasattr(s, "set_clipboard"):
+                return _err("This workspace's connection has no clipboard. Use kasm_type.")
+            s.set_clipboard(text)
+            time.sleep(PASTE_SETTLE_SECONDS)  # let the desktop see the new clipboard before the shortcut
+            s.combo(combo)
+            time.sleep(PASTE_SETTLE_SECONDS)  # the paste is served from this connection; keep it open
+        return _verify_after(kid, _ok(session_id=kid, pasted_chars=len(text), shortcut=shortcut),
+                             args.get("verify_after"))
+    except Exception as e:
+        return _err(str(e))
 
 
 def kasm_key(args, **kw):
@@ -819,6 +846,15 @@ _TOOLS = [
      "MFA codes, or payment details — stop and ask the owner to take over the session for those.",
      {"type": "object", "required": ["text"], "properties": {
          **_SID, "text": {"type": "string"}, "press_enter": {"type": "boolean"},
+         "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),
+    ("kasm_paste", kasm_paste,
+     "Paste text into the focused field through the clipboard: fast, and exact for any characters. Sets the "
+     "session's clipboard, then presses the paste shortcut. Terminals usually need shortcut \"ctrl+shift+v\". "
+     "It replaces whatever was on the session's clipboard. NEVER paste passwords, "
+     "MFA codes, or payment details — stop and ask the owner to take over the session for those.",
+     {"type": "object", "required": ["text"], "properties": {
+         **_SID, "text": {"type": "string"},
+         "shortcut": {"type": "string", "description": "Paste shortcut (default ctrl+v)."},
          "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),
     ("kasm_key", kasm_key, "Press keys/shortcuts in the Kasm session, e.g. 'ctrl+l', 'Return', 'Tab', 'Escape'.",
      {"type": "object", "required": ["keys"], "properties": {
