@@ -700,6 +700,11 @@ def kasm_type(args, **kw):
         return _err("text is required")
     try:
         kid = _ready_session(args)
+        if _session_state(kid)["typing"] == "ascii":
+            bad = list(dict.fromkeys(ch for ch in text if not (" " <= ch <= "~" or ch in "\n\t")))
+            if bad:
+                return _err(f"This session cannot type: {' '.join(bad)}. Nothing was typed. "
+                            "Use kasm_paste for this text.")
         with _session(kid) as s:
             s.type(text)
             if args.get("press_enter"):

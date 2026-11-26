@@ -295,3 +295,46 @@ def test_server_instructions_and_tool_list_teach_the_wait_step():
     assert "kasm_start -> kasm_wait until state is ready -> kasm_look -> act" in server.server.instructions
     wait = next(params for name, _, _, params in tools._TOOLS if name == "kasm_wait")
     assert set(wait["properties"]) == {"session_id", "timeout_seconds"}
+
+
+# ------------------------------------------------------------- kasm_type and what a session can type
+def typed(monkeypatch):
+    sessions = []
+
+    def connect(kid):
+        sessions.append(FakeVNC())
+        return sessions[-1]
+
+    monkeypatch.setattr(tools, "_session", connect)
+    return sessions
+
+
+def test_type_refuses_characters_an_ascii_session_cannot_type(monkeypatch, tmp_path):
+    publish(tmp_path, "ready", typing="ascii")
+    sessions = typed(monkeypatch)
+    result = json.loads(tools.kasm_type({"session_id": SID, "text": "café € é", "press_enter": True}))
+    assert result["ok"] is False
+    assert "cannot type: é €" in result["error"] and "Use kasm_paste" in result["error"]
+    assert sessions == []
+
+
+def test_type_sends_plain_ascii_to_an_ascii_session(monkeypatch, tmp_path):
+    publish(tmp_path, "ready", typing="ascii")
+    sessions = typed(monkeypatch)
+    text = "1<2 3>4 ,./?;:'[]\\|`~!@#$%^&*() <<EOF =+_-\tline\n"
+    assert json.loads(tools.kasm_type({"session_id": SID, "text": text}))["ok"] is True
+    assert sessions[0].actions == [("type", (text,))]
+
+
+def test_type_sends_everything_to_a_unicode_session(monkeypatch, tmp_path):
+    publish(tmp_path, "ready", typing="unicode")
+    sessions = typed(monkeypatch)
+    assert json.loads(tools.kasm_type({"session_id": SID, "text": "café € 日本"}))["ok"] is True
+    assert sessions[0].actions == [("type", ("café € 日本",))]
+
+
+def test_type_sends_everything_to_a_plain_desktop(monkeypatch):
+    monkeypatch.delenv("KASM_SESSION_STATUS_DIR")
+    sessions = typed(monkeypatch)
+    assert json.loads(tools.kasm_type({"session_id": SID, "text": "café €"}))["ok"] is True
+    assert sessions[0].actions == [("type", ("café €",))]
