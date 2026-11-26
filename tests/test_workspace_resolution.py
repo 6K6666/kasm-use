@@ -93,3 +93,98 @@ def test_kasm_start_ambiguous_never_creates_session(monkeypatch):
     assert result["ok"] is False
     assert "Ambiguous workspace" in result["error"]
     assert "request_kasm" not in calls
+
+
+# ------------------------------------------------------------------------ workspace allow-list
+ESTATE = [
+    {"friendly_name": "Ubuntu Noble", "name": "homelab/base:1.0", "image_id": "base", "enabled": True},
+    {"friendly_name": "Windows 11 Disposable", "name": "win:1", "image_id": "win", "enabled": True},
+    {"friendly_name": "Windows 11 POC", "name": None, "image_id": "poc", "enabled": True},
+    {"friendly_name": "Ubuntu Noble Worker v3 Test", "name": "homelab/worker:3.0", "image_id": "worker", "enabled": True},
+]
+
+
+@pytest.fixture
+def estate(monkeypatch):
+    calls = []
+
+    def fake_call(endpoint, **kwargs):
+        calls.append((endpoint, kwargs))
+        return {
+            "get_images": {"images": ESTATE}, "get_kasms": {"kasms": []},
+            "request_kasm": {"kasm_id": "d" * 32, "session_token": "test-only", "username": "test"},
+            "get_kasm_status": {"kasm": {"operational_status": "running"}},
+        }[endpoint]
+
+    monkeypatch.setattr(tools, "_call", fake_call)
+    monkeypatch.setattr(tools, "_user", lambda: "test-user")
+    monkeypatch.delenv("KASM_SESSION_STATE_FILE", raising=False)
+    monkeypatch.setattr(tools, "_STATE_LOADED", False)
+    monkeypatch.setattr(tools, "_SESSIONS", {})
+    monkeypatch.setenv("KASM_WORKSPACE_ALLOW", " Ubuntu Noble,windows 11 disposable ,")
+    return calls
+
+
+def requested(calls):
+    return [kwargs["image_id"] for endpoint, kwargs in calls if endpoint == "request_kasm"]
+
+
+def test_list_shows_only_allowed_workspaces(estate):
+    listed = json.loads(tools.kasm_list({}))["workspaces"]
+    assert [row["workspace"] for row in listed] == ["Ubuntu Noble", "Windows 11 Disposable"]
+
+
+def test_list_shows_everything_without_an_allow_list(estate, monkeypatch):
+    monkeypatch.delenv("KASM_WORKSPACE_ALLOW")
+    assert len(json.loads(tools.kasm_list({}))["workspaces"]) == 4
+
+
+@pytest.mark.parametrize("name", ["Windows 11 POC", "windows 11 poc", "Ubuntu Noble Worker v3 Test", "Worker", "POC"])
+def test_start_refuses_a_workspace_that_is_not_allowed(estate, name):
+    result = json.loads(tools.kasm_start({"workspace": name}))
+    assert result == {"ok": False, "error": "That workspace is not enabled for this kasm-use instance."}
+    assert requested(estate) == []
+
+
+@pytest.mark.parametrize(("name", "image"), [("Ubuntu Noble", "base"), ("Windows 11 Disposable", "win"), ("ubuntu", "base")])
+def test_start_resolves_names_among_allowed_workspaces_only(estate, name, image):
+    assert json.loads(tools.kasm_start({"workspace": name}))["ok"] is True
+    assert requested(estate) == [image]
+
+
+def test_a_mistyped_name_lists_only_allowed_workspaces(estate):
+    error = json.loads(tools.kasm_start({"workspace": "Fedora"}))["error"]
+    assert error == "No matching workspace. Available: Ubuntu Noble, Windows 11 Disposable"
+
+
+def test_start_allows_everything_without_an_allow_list(estate, monkeypatch):
+    monkeypatch.delenv("KASM_WORKSPACE_ALLOW")
+    assert json.loads(tools.kasm_start({"workspace": "Windows 11 POC"}))["ok"] is True
+    assert requested(estate) == ["poc"]
+
+
+@pytest.mark.parametrize("args", [{}, {"workspace": ""}, {"workspace": None}])
+def test_start_needs_a_workspace_name(estate, args):
+    result = json.loads(tools.kasm_start(args))
+    assert result == {"ok": False, "error": "Give a workspace name from kasm_list."}
+    assert estate == []
+
+
+# ---------------------------------------------------------------------------- descriptions
+def schema(tool):
+    return next((description, params) for name, _, description, params in tools._TOOLS if name == tool)
+
+
+def test_tool_descriptions_match_what_the_tools_accept():
+    from kasm_use import vnc
+    key_description, _ = schema("kasm_key")
+    for name in ("plus", "minus", "capslock", "f1", "page_down", "super", "Return".lower()):
+        assert name in key_description
+    assert all(name in key_description for name in vnc._NAMED)
+    start_description, start = schema("kasm_start")
+    assert start["properties"]["workspace"]["description"] == "Workspace name exactly as kasm_list shows it."
+    assert start["required"] == ["workspace"]
+    assert "Chrome" not in start_description and "Terminal" not in start_description
+    _, claim = schema("kasm_claim_pilot")
+    assert claim["properties"]["session_id"]["description"] == (
+        "The 32-character id of a Windows session the owner launched from the Kasm dashboard.")

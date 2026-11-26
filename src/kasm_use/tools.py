@@ -20,6 +20,7 @@ Configuration comes from the environment only:
   KASM_API_URL, KASM_API_KEY, KASM_API_KEY_SECRET  - a Kasm API key (see README for permissions)
   KASM_USER_ID       - the Kasm user sessions are created for, so the owner can watch/take over
   KASM_VERIFY_TLS    - "false" to accept a self-signed Kasm certificate (default: verify)
+  KASM_WORKSPACE_ALLOW - optional comma-separated workspace names; only these are listed and startable
   KASM_USE_SCREEN    - optional WIDTHxHEIGHT asked of each new desktop (default: the image's own size)
   KASM_PILOT_WORKSPACE_ID, KASM_SESSION_STATUS_DIR - optional; sessions of that one workspace
                        take their readiness from <dir>/<session_id>.json, written by whatever
@@ -528,6 +529,14 @@ def _wait_visible(kid: str, seconds: float) -> bool:
     return False
 
 
+def _allowed(images: list) -> list:
+    """The workspaces this instance may list and start: all of them unless KASM_WORKSPACE_ALLOW names some."""
+    names = {name.strip().casefold() for name in os.environ.get("KASM_WORKSPACE_ALLOW", "").split(",") if name.strip()}
+    if not names:
+        return images
+    return [i for i in images if isinstance(i.get("friendly_name"), str) and i["friendly_name"].strip().casefold() in names]
+
+
 def _resolve_workspace(images, requested):
     """Pick a Kasm workspace by exact friendly name before any partial match.
 
@@ -560,7 +569,7 @@ def kasm_list(args, **kw):
     try:
         _load_sessions()
         images = [{"workspace": i.get("friendly_name"), "image": i.get("name")}
-                  for i in _call("get_images").get("images", []) if i.get("enabled")]
+                  for i in _allowed(_call("get_images").get("images", [])) if i.get("enabled")]
         running = {_kid(k["kasm_id"]): k.get("operational_status") for k in _call("get_kasms").get("kasms", [])}
         with _LOCK:
             before = len(_SESSIONS)
@@ -622,7 +631,9 @@ def kasm_claim_pilot(args, **kw):
 
 
 def kasm_start(args, **kw):
-    workspace = args.get("workspace") or "Chrome"
+    workspace = args.get("workspace")
+    if not workspace:
+        return _err("Give a workspace name from kasm_list.")
     try:
         _load_sessions()
         _save_sessions()  # fail before allocating a Kasm if configured recovery storage is unusable
@@ -632,7 +643,16 @@ def kasm_start(args, **kw):
         if mode not in (None, "Enabled", "Disabled"):
             return _err("persistent_profile_mode must be Enabled or Disabled")
         images = _call("get_images").get("images", [])
-        img = _resolve_workspace(images, workspace)
+        try:
+            img = _resolve_workspace(_allowed(images), workspace)
+        except ValueError:
+            try:
+                _resolve_workspace(images, workspace)
+            except ValueError:
+                pass
+            else:
+                return _err("That workspace is not enabled for this kasm-use instance.")
+            raise  # no such workspace at all: the error names the ones that are allowed
         request = {"image_id": img["image_id"], "user_id": _user(), "enable_sharing": False}
         transport = "vnc"
         if img.get("image_type") in ("Server", "Server Pool"):
@@ -835,7 +855,8 @@ def kasm_key(args, **kw):
     keys = [k for k in re.split(r"[\s,]+", args.get("keys", "")) if k]
     bad = [k for k in keys if not _KEY_RE.match(k)]
     if not keys or bad:
-        return _err(f"keys must be key names like ctrl+l, Return, Tab, Escape (invalid: {bad})")
+        return _err(f"keys must be key names like ctrl+l, Return, Tab, Escape, plus (invalid: {bad}). "
+                    f"Named keys: {vnc.KEY_NAMES}.")
     try:
         combos = [[vnc.keysym(part) for part in k.split("+") if part] for k in keys]
         kid = _ready_session(args)
@@ -893,13 +914,15 @@ _TOOLS = [
      {"type": "object", "properties": {}}),
     ("kasm_claim_pilot", kasm_claim_pilot,
      "Attach to a running Windows pilot session launched from the dashboard by this instance's configured owner.",
-     {"type": "object", "required": ["session_id"], "properties": _SID}),
+     {"type": "object", "required": ["session_id"], "properties": {"session_id": {
+         "type": "string",
+         "description": "The 32-character id of a Windows session the owner launched from the Kasm dashboard."}}}),
     ("kasm_start", kasm_start,
-     "Start a Kasm workspace session (e.g. 'Chrome', 'Terminal') as the owner, so they can watch it. "
+     "Start a session of one of the workspaces kasm_list shows, as the owner, so they can watch it. "
      "Returns the session's state: when it is ready call kasm_look, otherwise call kasm_wait until it is. "
      "Only sessions you start can be controlled.",
-     {"type": "object", "properties": {
-         "workspace": {"type": "string", "description": "Workspace name, e.g. Chrome"},
+     {"type": "object", "required": ["workspace"], "properties": {
+         "workspace": {"type": "string", "description": "Workspace name exactly as kasm_list shows it."},
          "persistent_profile_mode": {
              "type": "string", "enum": ["Enabled", "Disabled"],
              "description": "Explicitly enable or disable a workspace persistent profile at launch. "
@@ -945,7 +968,10 @@ _TOOLS = [
          **_SID, "text": {"type": "string"},
          "shortcut": {"type": "string", "description": "Paste shortcut (default ctrl+v)."},
          "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),
-    ("kasm_key", kasm_key, "Press keys/shortcuts in the Kasm session, e.g. 'ctrl+l', 'Return', 'Tab', 'Escape'.",
+    ("kasm_key", kasm_key,
+     "Press keys or shortcuts in the Kasm session. Join keys held together with + (ctrl+l, ctrl+shift+t, "
+     "ctrl+plus) and separate presses with spaces (Tab Tab Return). A single letter or digit is itself. "
+     f"Named keys: {vnc.KEY_NAMES}.",
      {"type": "object", "required": ["keys"], "properties": {
          **_SID, "keys": {"type": "string"},
          "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),

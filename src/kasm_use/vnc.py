@@ -205,9 +205,13 @@ _NAMED = {
     "pagedown": 0xFF56, "next": 0xFF56, "left": 0xFF51, "up": 0xFF52, "right": 0xFF53, "down": 0xFF54,
     "space": 0x20, "ctrl": 0xFFE3, "control": 0xFFE3, "control_l": 0xFFE3, "shift": 0xFFE1,
     "shift_l": 0xFFE1, "alt": 0xFFE9, "alt_l": 0xFFE9, "super": 0xFFEB, "super_l": 0xFFEB,
-    "meta": 0xFFE7, "win": 0xFFEB, "menu": 0xFF67, "print": 0xFF61,
+    "meta": 0xFFE7, "win": 0xFFEB, "menu": 0xFF67, "print": 0xFF61, "capslock": 0xFFE5,
+    "plus": 0x2B, "minus": 0x2D, "equal": 0x3D, "comma": 0x2C, "period": 0x2E, "slash": 0x2F, "backslash": 0x5C,
     **{f"f{i}": 0xFFBE + i - 1 for i in range(1, 13)},
 }
+
+
+KEY_NAMES = ", ".join(_NAMED)
 
 
 def keysym(name: str) -> int:
@@ -216,7 +220,7 @@ def keysym(name: str) -> int:
         return _NAMED[n]
     if len(name) == 1:
         return char_keysym(name)
-    raise ValueError(f"unknown key name {name!r}")
+    raise ValueError(f"unknown key name {name!r}. Valid names: {KEY_NAMES}; or any single character.")
 
 
 def char_keysym(ch: str) -> int:

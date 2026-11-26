@@ -233,3 +233,23 @@ def test_screenshot_gives_up_when_the_desktop_never_settles():
     session = _bare_session(b"".join(_update_message(_extended_desktop_size(*size)) for size in sizes))
     with pytest.raises(ConnectionError, match="changing size"):
         session.screenshot()
+
+
+# --------------------------------------------------------------------------------- key names
+@pytest.mark.parametrize(("name", "sym"), [
+    ("plus", 0x2B), ("minus", 0x2D), ("equal", 0x3D), ("comma", 0x2C), ("period", 0x2E),
+    ("slash", 0x2F), ("backslash", 0x5C), ("capslock", 0xFFE5), ("CapsLock", 0xFFE5),
+    ("f1", 0xFFBE), ("F12", 0xFFC9),
+])
+def test_punctuation_and_function_keys_have_names(name, sym):
+    assert vnc.keysym(name) == sym
+
+
+def test_an_unknown_key_name_lists_the_valid_ones():
+    with pytest.raises(ValueError) as error:
+        vnc.keysym("hyper")
+    message = str(error.value)
+    assert "unknown key name 'hyper'" in message
+    for name in ("plus", "capslock", "f12", "Return".lower(), "ctrl", "page_down"):
+        assert name in message
+    assert "single character" in message
