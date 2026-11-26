@@ -222,3 +222,123 @@ def test_state_file_is_not_created_when_recovery_is_disabled():
     tools._save_sessions()
 
     assert tools._SESSIONS[SID]["session_token"] == "token"
+
+
+# ------------------------------------------------- one state file shared by several client processes
+S1, S2 = "1" * 32, "2" * 32
+
+
+class Process:
+    """One kasm-use process: its own in-memory state, sharing the state file with the others."""
+
+    def __init__(self):
+        self.state = {"_SESSIONS": {}, "_PERSISTED": set(), "_STOPPED": set(),
+                      "_STATE_LOADED": False, "_STATE_PATH": None}
+
+    def __enter__(self):
+        for name, value in self.state.items():
+            setattr(tools, name, value)
+        return self
+
+    def __exit__(self, *_):
+        for name in self.state:
+            self.state[name] = getattr(tools, name)
+
+    def start(self, kid):
+        with self:
+            tools._load_sessions()
+            tools._SESSIONS[kid] = {"username": "alice", "session_token": "t", "workspace": "Ubuntu", "started": 1}
+            tools._save_sessions()
+
+    def stop(self, kid, monkeypatch):
+        with self:
+            monkeypatch.setattr(tools, "_call", lambda *a, **k: {})
+            assert json.loads(tools.kasm_stop({"session_id": kid}))["ok"] is True
+
+    def save(self):
+        with self:
+            tools._save_sessions()
+
+    def resolve(self, kid):
+        with self:
+            return tools._resolve_session({"session_id": kid})
+
+
+def on_disk(path):
+    return sorted(entry["session_id"] for entry in json.loads(path.read_text())["sessions"])
+
+
+def test_two_processes_starting_sessions_keep_both_records(monkeypatch, tmp_path):
+    path = tmp_path / "private" / "sessions.json"
+    configure_state_file(monkeypatch, path)
+    a, b = Process(), Process()
+    a.start(S1)
+    b.start(S2)
+    a.save()
+    assert on_disk(path) == [S1, S2]
+    assert a.resolve(S2) == S2 and b.resolve(S1) == S1
+
+
+def test_a_session_one_process_stopped_does_not_reappear_when_another_saves(monkeypatch, tmp_path):
+    path = tmp_path / "private" / "sessions.json"
+    configure_state_file(monkeypatch, path)
+    a, b = Process(), Process()
+    a.start(S1)
+    b.start(S2)          # b has now read s1 from the file
+    assert b.resolve(S1) == S1
+    a.stop(S1, monkeypatch)
+    b.save()
+    assert on_disk(path) == [S2]
+    with pytest.raises(PermissionError):
+        b.resolve(S1)
+    a.save()
+    assert on_disk(path) == [S2]
+
+
+def test_a_running_process_can_use_a_session_another_started_later(monkeypatch, tmp_path):
+    path = tmp_path / "private" / "sessions.json"
+    configure_state_file(monkeypatch, path)
+    a, b = Process(), Process()
+    b.save()             # b loaded the (empty) state before s1 existed
+    a.start(S1)
+    assert b.resolve(S1) == S1
+    a.stop(S1, monkeypatch)
+    with pytest.raises(PermissionError):
+        b.resolve(S1)
+
+
+def test_a_session_that_ended_elsewhere_is_dropped_for_every_process(monkeypatch, tmp_path):
+    path = tmp_path / "private" / "sessions.json"
+    configure_state_file(monkeypatch, path)
+    a, b = Process(), Process()
+    a.start(S1)
+    b.start(S2)
+    with a:              # kasm_list notices Kasm no longer runs s1
+        monkeypatch.setattr(tools, "_call", lambda endpoint, **_: {
+            "get_images": {"images": []}, "get_kasms": {"kasms": [{"kasm_id": S2, "operational_status": "running"}]},
+        }[endpoint])
+        listed = json.loads(tools.kasm_list({}))["sessions"]
+    assert [row["session_id"] for row in listed] == [S2]
+    assert on_disk(path) == [S2]
+    b.save()
+    assert on_disk(path) == [S2]
+
+
+def test_real_processes_saving_at_once_lose_no_record(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+    path = tmp_path / "private" / "sessions.json"
+    script = (
+        "import sys, time\n"
+        "from kasm_use import tools\n"
+        "kid = sys.argv[1] * 32\n"
+        "tools._load_sessions()\n"
+        "time.sleep(0.2)\n"  # everyone has loaded the empty file before anyone saves
+        "tools._SESSIONS[kid] = {'username': 'alice', 'workspace': 'Ubuntu', 'started': 1}\n"
+        "tools._save_sessions()\n"
+    )
+    env = {"KASM_SESSION_STATE_FILE": str(path), "KASM_USER_ID": OWNER, "KASM_API_URL": "https://kasm.invalid",
+           "PATH": "/usr/bin:/bin"}
+    workers = [subprocess.Popen([sys.executable, "-c", script, digit], env=env) for digit in "12345678"]
+    assert [worker.wait(timeout=30) for worker in workers] == [0] * 8
+    assert on_disk(path) == [digit * 32 for digit in "12345678"]

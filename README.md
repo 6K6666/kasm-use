@@ -93,7 +93,7 @@ Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, 
 | `KASM_API_KEY` / `KASM_API_KEY_SECRET` | yes | the API key pair |
 | `KASM_USER_ID` | yes | the Kasm user sessions are created for |
 | `KASM_VERIFY_TLS` | no | `false` to accept a self-signed Kasm certificate (default `true`) |
-| `KASM_SESSION_STATE_FILE` | no | private JSON file for reconnecting to tracked sessions after a kasm-use restart; stores no login tokens |
+| `KASM_SESSION_STATE_FILE` | no | private JSON file for reconnecting to tracked sessions after a kasm-use restart; stores no login tokens; several client processes may share one file (each save locks it and merges) |
 | `KASM_USE_TOKEN` | HTTP only | bearer token clients must send |
 | `KASM_PILOT_WORKSPACE_ID` | no | image ID of one workspace whose desktops are prepared by an outside controller (see [Slow-starting workspaces](#slow-starting-workspaces)) |
 | `KASM_SESSION_STATUS_DIR` | no | directory where that controller publishes `<session_id>.json` for each of that workspace's sessions |

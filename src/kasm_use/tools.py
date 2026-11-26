@@ -31,6 +31,10 @@ scaled to the size VNC reports on each connection.
 from __future__ import annotations
 
 import base64
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
 import json
 import math
 import os
@@ -58,6 +62,10 @@ _LOCK = threading.Lock()
 _STATE_LOCK = threading.RLock()
 _STATE_LOADED = False
 _STATE_PATH: str | None = None
+# Shared state file bookkeeping: the session IDs last seen in the file, and the ones this process
+# stopped (or saw end), which must not be adopted again from a copy another process still holds.
+_PERSISTED: set[str] = set()
+_STOPPED: set[str] = set()
 _STATE_VERSION = 1
 
 # kasm_id -> (image_width, image_height) of the last screenshot shown to the model.
@@ -118,135 +126,179 @@ def _session_state_path() -> str | None:
     return path
 
 
+def _read_state(path: str) -> dict[str, dict]:
+    """The session records in the state file, validated. Empty when the file does not exist yet."""
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        raise RuntimeError("Kasm session state must be a private regular file.") from None
+
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
+            or info.st_nlink != 1
+            or info.st_size > 1_048_576
+        ):
+            raise RuntimeError("Kasm session state must be a private regular file.")
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            fd = -1
+            saved = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        raise RuntimeError("Kasm session state is unreadable or invalid.") from None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+    if not isinstance(saved, dict) or saved.get("version") != _STATE_VERSION:
+        raise RuntimeError("Kasm session state has an unsupported format.")
+    if _kid(saved.get("user_id", "")) != _kid(_user()):
+        raise RuntimeError("Kasm session state belongs to a different Kasm user.")
+    entries = saved.get("sessions")
+    if not isinstance(entries, list) or len(entries) > 1000:
+        raise RuntimeError("Kasm session state has an invalid session list.")
+
+    restored = {}
+    for entry in entries:
+        if (not isinstance(entry, dict)
+            or set(entry) - {"transport", "image_id"} != {"session_id", "username", "workspace", "started"}
+            or entry.get("transport", "vnc") not in ("vnc", "guac")
+            or not isinstance(entry.get("image_id", ""), str) or len(entry.get("image_id", "")) > 200):
+            raise RuntimeError("Kasm session state contains invalid session metadata.")
+        kid = _kid(entry["session_id"])
+        username, workspace, started = entry["username"], entry["workspace"], entry["started"]
+        if (
+            not re.fullmatch(r"[a-f0-9]{32}", kid)
+            or not isinstance(username, str)
+            or not username
+            or len(username) > 200
+            or not isinstance(workspace, str)
+            or not workspace
+            or len(workspace) > 200
+            or isinstance(started, bool)
+            or not isinstance(started, (int, float))
+            or not math.isfinite(started)
+            or started < 0
+            or kid in restored
+        ):
+            raise RuntimeError("Kasm session state contains invalid session metadata.")
+        restored[kid] = {
+            "username": username,
+            "workspace": workspace,
+            "started": started,
+            "session_token": None,
+            "path": None,
+            **({"transport": "guac"} if entry.get("transport") == "guac" else {}),
+            **({"image_id": entry["image_id"]} if entry.get("image_id") else {}),
+        }
+    return restored
+
+
+def _reconcile(on_disk: dict[str, dict]) -> None:
+    """Bring this process in line with the state file, which other client processes also write.
+
+    A record on disk that this process does not know was started by another process: adopt it.
+    A record this process once saw on disk that is gone was stopped by another process: drop it.
+    A record this process stopped is never adopted again.
+    """
+    with _LOCK:
+        gone = [kid for kid in _SESSIONS if kid in _PERSISTED and kid not in on_disk]
+        browsers = [kid for kid in gone if _SESSIONS[kid].get("transport") == "guac"]
+        for kid in gone:
+            _SESSIONS.pop(kid, None)
+            _LAST_SHOT.pop(kid, None)
+            _VISIBLE.discard(kid)
+        for kid, creds in on_disk.items():
+            if kid not in _STOPPED:
+                _SESSIONS.setdefault(kid, creds)
+        _PERSISTED.clear()
+        _PERSISTED.update(on_disk)
+    for kid in browsers:
+        guac.close(kid)
+
+
+def _state_path() -> str | None:
+    """The configured state file. It cannot change while kasm-use is running."""
+    global _STATE_LOADED, _STATE_PATH
+    path = _session_state_path()
+    if _STATE_LOADED and path != _STATE_PATH:
+        raise RuntimeError("KASM_SESSION_STATE_FILE cannot change while kasm-use is running.")
+    return path
+
+
 def _load_sessions() -> None:
+    """Re-read the state file. Every tool call does, so a session another process started is usable here."""
     global _STATE_LOADED, _STATE_PATH
     with _STATE_LOCK:
-        path = _session_state_path()
-        if _STATE_LOADED:
-            if path != _STATE_PATH:
-                raise RuntimeError("KASM_SESSION_STATE_FILE cannot change while kasm-use is running.")
-            return
-        if path is None:
-            _STATE_PATH, _STATE_LOADED = None, True
-            return
-
-        try:
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(path, flags)
-        except FileNotFoundError:
-            _STATE_PATH, _STATE_LOADED = path, True
-            return
-        except OSError:
-            raise RuntimeError("Kasm session state must be a private regular file.") from None
-
-        try:
-            info = os.fstat(fd)
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.geteuid()
-                or stat.S_IMODE(info.st_mode) & 0o077
-                or info.st_nlink != 1
-                or info.st_size > 1_048_576
-            ):
-                raise RuntimeError("Kasm session state must be a private regular file.")
-            with os.fdopen(fd, "r", encoding="utf-8") as stream:
-                fd = -1
-                saved = json.load(stream)
-        except (OSError, ValueError, TypeError):
-            raise RuntimeError("Kasm session state is unreadable or invalid.") from None
-        finally:
-            if fd >= 0:
-                os.close(fd)
-
-        if not isinstance(saved, dict) or saved.get("version") != _STATE_VERSION:
-            raise RuntimeError("Kasm session state has an unsupported format.")
-        if _kid(saved.get("user_id", "")) != _kid(_user()):
-            raise RuntimeError("Kasm session state belongs to a different Kasm user.")
-        entries = saved.get("sessions")
-        if not isinstance(entries, list) or len(entries) > 1000:
-            raise RuntimeError("Kasm session state has an invalid session list.")
-
-        restored = {}
-        for entry in entries:
-            if (not isinstance(entry, dict)
-                or set(entry) - {"transport", "image_id"} != {"session_id", "username", "workspace", "started"}
-                or entry.get("transport", "vnc") not in ("vnc", "guac")
-                or not isinstance(entry.get("image_id", ""), str) or len(entry.get("image_id", "")) > 200):
-                raise RuntimeError("Kasm session state contains invalid session metadata.")
-            kid = _kid(entry["session_id"])
-            username, workspace, started = entry["username"], entry["workspace"], entry["started"]
-            if (
-                not re.fullmatch(r"[a-f0-9]{32}", kid)
-                or not isinstance(username, str)
-                or not username
-                or len(username) > 200
-                or not isinstance(workspace, str)
-                or not workspace
-                or len(workspace) > 200
-                or isinstance(started, bool)
-                or not isinstance(started, (int, float))
-                or not math.isfinite(started)
-                or started < 0
-                or kid in restored
-            ):
-                raise RuntimeError("Kasm session state contains invalid session metadata.")
-            restored[kid] = {
-                "username": username,
-                "workspace": workspace,
-                "started": started,
-                "session_token": None,
-                "path": None,
-                **({"transport": "guac"} if entry.get("transport") == "guac" else {}),
-                **({"image_id": entry["image_id"]} if entry.get("image_id") else {}),
-            }
-
-        with _LOCK:
-            for kid, creds in restored.items():
-                _SESSIONS.setdefault(kid, creds)
+        path = _state_path()
+        if path is not None:
+            _reconcile(_read_state(path))
         _STATE_PATH, _STATE_LOADED = path, True
 
 
 def _save_sessions() -> None:
-    _load_sessions()
+    global _STATE_LOADED, _STATE_PATH
     with _STATE_LOCK:
-        path = _session_state_path()
+        path = _state_path()
         if path is None:
+            _STATE_PATH, _STATE_LOADED = None, True
             return
-        with _LOCK:
-            sessions = [
-                {
-                    "session_id": kid,
-                    "username": creds["username"],
-                    "workspace": creds["workspace"],
-                    "started": creds["started"],
-                    **({"transport": "guac"} if creds.get("transport") == "guac" else {}),
-                    **({"image_id": creds["image_id"]} if creds.get("image_id") else {}),
-                }
-                for kid, creds in _SESSIONS.items() if not creds.get("pilot")
-            ]
-        payload = {"version": _STATE_VERSION, "user_id": _user(), "sessions": sessions}
-        fd, temporary = tempfile.mkstemp(prefix=".sessions-", dir=os.path.dirname(path))
+        # Several client processes share this file. Hold an exclusive lock from the re-read to the
+        # replace, so a record another process wrote in between is merged and never overwritten.
         try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                fd = -1
-                json.dump(payload, stream, separators=(",", ":"), allow_nan=False)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, path)
-            directory_fd = os.open(os.path.dirname(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except (OSError, TypeError, ValueError):
-            if fd >= 0:
-                os.close(fd)
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+            lock = os.open(path + ".lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except OSError:
             raise RuntimeError("Could not write private Kasm session state.") from None
+        try:
+            if fcntl:  # shortcut: no cross-process lock on Windows; use one client process per state file there
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            _reconcile(_read_state(path))
+            _STATE_PATH, _STATE_LOADED = path, True
+            with _LOCK:
+                sessions = [
+                    {
+                        "session_id": kid,
+                        "username": creds["username"],
+                        "workspace": creds["workspace"],
+                        "started": creds["started"],
+                        **({"transport": "guac"} if creds.get("transport") == "guac" else {}),
+                        **({"image_id": creds["image_id"]} if creds.get("image_id") else {}),
+                    }
+                    for kid, creds in _SESSIONS.items() if not creds.get("pilot")
+                ]
+            payload = {"version": _STATE_VERSION, "user_id": _user(), "sessions": sessions}
+            fd, temporary = tempfile.mkstemp(prefix=".sessions-", dir=os.path.dirname(path))
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    fd = -1
+                    json.dump(payload, stream, separators=(",", ":"), allow_nan=False)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+                directory_fd = os.open(os.path.dirname(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except (OSError, TypeError, ValueError):
+                if fd >= 0:
+                    os.close(fd)
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+                raise RuntimeError("Could not write private Kasm session state.") from None
+            with _LOCK:
+                _PERSISTED.clear()
+                _PERSISTED.update(entry["session_id"] for entry in sessions)
+        finally:
+            os.close(lock)
 
 
 def _verify_after(kid: str, result: str, enabled: bool):
@@ -490,6 +542,7 @@ def kasm_list(args, **kw):
                 _SESSIONS.pop(kid, None)
                 _LAST_SHOT.pop(kid, None)
                 _VISIBLE.discard(kid)
+                _STOPPED.add(kid)
             sessions = [{"session_id": kid, "workspace": s["workspace"], "status": running.get(kid),
                          "state": _session_state(kid)["state"]}
                         for kid, s in _SESSIONS.items()]
@@ -591,6 +644,7 @@ def kasm_start(args, **kw):
                 _SESSIONS.pop(kid, None)
                 _LAST_SHOT.pop(kid, None)
                 _VISIBLE.discard(kid)
+                _STOPPED.add(kid)
             try:
                 _save_sessions()
             except Exception:
@@ -792,6 +846,7 @@ def kasm_stop(args, **kw):
             stopped = _SESSIONS.pop(kid, {})
             _LAST_SHOT.pop(kid, None)
             _VISIBLE.discard(kid)
+            _STOPPED.add(kid)
         _save_sessions()
         if stopped.get("transport") == "guac":
             guac.close(kid)
