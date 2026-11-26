@@ -338,3 +338,63 @@ def test_type_sends_everything_to_a_plain_desktop(monkeypatch):
     sessions = typed(monkeypatch)
     assert json.loads(tools.kasm_type({"session_id": SID, "text": "café €"}))["ok"] is True
     assert sessions[0].actions == [("type", ("café €",))]
+
+
+# ------------------------------------------------------ a status file nobody is updating any more
+@pytest.mark.parametrize("phase", ["queued", "preparing"])
+def test_a_status_file_that_stopped_being_updated_is_a_failure(monkeypatch, tmp_path, phase):
+    publish(tmp_path, phase, "Signing in")
+    monkeypatch.setattr(tools.time, "time", lambda: STARTED + tools.STATUS_STALE_SECONDS - 1)
+    assert tools._session_state(SID)["state"] == phase
+    monkeypatch.setattr(tools.time, "time", lambda: STARTED + tools.STATUS_STALE_SECONDS + 1)
+    state = tools._session_state(SID)
+    assert (state["state"], state["detail"]) == ("failed", "The Windows controller stopped reporting this session.")
+    assert "stopped reporting" in json.loads(tools.kasm_look({"session_id": SID}))["error"]
+
+
+@pytest.mark.parametrize(("phase", "detail"), [("ready", ""), ("failed", "The guest did not boot.")])
+def test_a_finished_status_never_goes_stale(monkeypatch, tmp_path, phase, detail):
+    publish(tmp_path, phase, detail)
+    monkeypatch.setattr(tools.time, "time", lambda: STARTED + 10 * tools.STATUS_STALE_SECONDS)
+    assert tools._session_state(SID) == {"state": phase, "detail": detail, "typing": "ascii"}
+
+
+@pytest.mark.parametrize("updated", ["now", None, True, float("nan")])
+def test_a_status_file_without_a_usable_timestamp_counts_as_missing(tmp_path, updated):
+    (tmp_path / f"{SID}.json").write_text(json.dumps(
+        {"session_id": SID, "phase": "ready", "detail": "", "typing": "unicode", "updated": updated}))
+    assert tools._session_state(SID) == {"state": "preparing", "detail": "", "typing": "ascii"}  # the grace period
+
+
+# ------------------------------------------------- kasm_wait on a plain desktop that never comes
+def test_wait_reports_a_desktop_it_could_never_reach_as_failed(monkeypatch):
+    monkeypatch.delenv("KASM_SESSION_STATUS_DIR")
+
+    def gone(kid):
+        raise RuntimeError("Kasm session is not running.")
+
+    monkeypatch.setattr(tools, "_session", gone)
+    result = json.loads(tools.kasm_wait({"session_id": SID, "timeout_seconds": 5}))
+    assert (result["ok"], result["state"], result["waited_seconds"]) == (True, "failed", 5)
+    assert result["detail"] == "Could not reach the desktop: Kasm session is not running."
+
+
+def test_wait_says_when_the_desktop_answers_but_has_drawn_nothing(monkeypatch):
+    monkeypatch.delenv("KASM_SESSION_STATUS_DIR")
+    monkeypatch.setattr(tools, "_session", lambda kid: FakeVNC(blank=True))
+    result = json.loads(tools.kasm_wait({"session_id": SID, "timeout_seconds": 5}))
+    assert (result["state"], result["detail"]) == ("preparing", "The screen is still blank.")
+
+
+def test_wait_forgives_a_desktop_that_refuses_connections_at_first(monkeypatch):
+    monkeypatch.delenv("KASM_SESSION_STATUS_DIR")
+    attempts = []
+
+    def connect(kid):
+        attempts.append(kid)
+        if len(attempts) < 3:
+            raise ConnectionError("not accepting connections yet")
+        return FakeVNC(blank=False)
+
+    monkeypatch.setattr(tools, "_session", connect)
+    assert json.loads(tools.kasm_wait({"session_id": SID}))["state"] == "ready"

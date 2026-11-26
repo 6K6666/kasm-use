@@ -60,6 +60,7 @@ def test_own_session_is_resolved_with_or_without_dashes():
 def test_default_is_most_recent_own_session():
     tools._SESSIONS["aaa"] = {"started": 1, "workspace": "Chrome"}
     tools._SESSIONS["bbb"] = {"started": 2, "workspace": "Terminal"}
+    tools._MINE.update(tools._SESSIONS)  # both started by this process
     assert tools._resolve_session({}) == "bbb"
 
 

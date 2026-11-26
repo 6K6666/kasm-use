@@ -1,5 +1,6 @@
 import json
 import stat
+import time
 
 import pytest
 
@@ -232,7 +233,7 @@ class Process:
     """One kasm-use process: its own in-memory state, sharing the state file with the others."""
 
     def __init__(self):
-        self.state = {"_SESSIONS": {}, "_PERSISTED": set(), "_STOPPED": set(),
+        self.state = {"_SESSIONS": {}, "_PERSISTED": set(), "_STOPPED": set(), "_MINE": set(),
                       "_STATE_LOADED": False, "_STATE_PATH": None}
 
     def __enter__(self):
@@ -247,8 +248,14 @@ class Process:
     def start(self, kid):
         with self:
             tools._load_sessions()
-            tools._SESSIONS[kid] = {"username": "alice", "session_token": "t", "workspace": "Ubuntu", "started": 1}
+            tools._SESSIONS[kid] = {"username": "alice", "session_token": "t", "workspace": "Ubuntu",
+                                    "started": time.time()}
+            tools._MINE.add(kid)  # as kasm_start does
             tools._save_sessions()
+
+    def default(self):
+        with self:
+            return tools._resolve_session({})
 
     def stop(self, kid, monkeypatch):
         with self:
@@ -342,3 +349,47 @@ def test_real_processes_saving_at_once_lose_no_record(monkeypatch, tmp_path):
     workers = [subprocess.Popen([sys.executable, "-c", script, digit], env=env) for digit in "12345678"]
     assert [worker.wait(timeout=30) for worker in workers] == [0] * 8
     assert on_disk(path) == [digit * 32 for digit in "12345678"]
+
+
+# ------------------------------------------- which session a call means when it names none
+def test_the_default_session_never_moves_to_one_another_process_started(monkeypatch, tmp_path):
+    path = tmp_path / "private" / "sessions.json"
+    configure_state_file(monkeypatch, path)
+    a, b = Process(), Process()
+    a.start(S1)
+    b.start(S2)                       # newer, and visible to a through the shared file
+    assert a.default() == S1          # a's calls keep going to the session a started
+    assert b.default() == S2
+    assert a.resolve(S2) == S2        # once a names s2 itself, it is one of a's too
+    assert a.default() == S2
+
+
+def test_stop_without_an_id_never_destroys_another_processs_session(monkeypatch, tmp_path):
+    path = tmp_path / "private" / "sessions.json"
+    configure_state_file(monkeypatch, path)
+    a, b = Process(), Process()
+    a.start(S1)
+    b.start(S2)
+    destroyed = []
+    with a:
+        monkeypatch.setattr(tools, "_call", lambda endpoint, **kw: destroyed.append(kw.get("kasm_id")) or {})
+        assert json.loads(tools.kasm_stop({}))["session_id"] == S1
+    assert destroyed == [S1] and on_disk(path) == [S2]
+
+
+def test_after_a_restart_the_only_tracked_session_is_the_default(monkeypatch, tmp_path):
+    path = tmp_path / "private" / "sessions.json"
+    configure_state_file(monkeypatch, path)
+    Process().start(S1)
+    assert Process().default() == S1
+
+
+def test_after_a_restart_with_several_sessions_the_call_must_name_one(monkeypatch, tmp_path):
+    path = tmp_path / "private" / "sessions.json"
+    configure_state_file(monkeypatch, path)
+    Process().start(S1)
+    Process().start(S2)
+    restarted = Process()
+    with pytest.raises(RuntimeError, match="session_id.*kasm_list"):
+        restarted.default()
+    assert restarted.resolve(S1) == S1 and restarted.default() == S1

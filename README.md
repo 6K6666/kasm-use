@@ -59,7 +59,7 @@ MCP client are the most useful details.
 | `kasm_click` | Click at x,y in the latest screenshot's coordinates |
 | `kasm_drag` | Drag from one point to another with the button held (menus, windows, sliders, drag and drop) |
 | `kasm_type` | Type text into the focused field |
-| `kasm_paste` | Paste text through the session clipboard: fast, exact for any characters |
+| `kasm_paste` | Paste text through the session clipboard: fast, exact for any characters. Needs **Allow Clipboard Up** for the user's Kasm group; KasmVNC does not confirm a clipboard, so check the result |
 | `kasm_key` | Keys/shortcuts, e.g. `ctrl+l`, `Return`, `Tab`, `ctrl+plus`; the tool description lists every key name |
 | `kasm_scroll` | Scroll, optionally at a point |
 | `kasm_stop` | Destroy the session |

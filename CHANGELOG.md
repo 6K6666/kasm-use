@@ -29,6 +29,11 @@ workspace: every new behaviour is switched on by an optional environment variabl
   `kasm_key` description and the unknown-key error list every name.
 - **`KASM_WORKSPACE_ALLOW`** limits which workspaces are listed and startable. `kasm_start` has no
   default workspace any more, and its examples no longer name workspaces you may not have.
+- **A call that names no session means one this client process started** (or was given by ID), not
+  the newest session in a state file shared with other clients. After a restart, a single tracked
+  session is still the default; with several, the call must pass `session_id`.
+- `kasm_wait` reports `failed` with the reason when a desktop could never be reached, and a status
+  file left at `queued` or `preparing` for 15 minutes counts as a dead controller.
 - Messages KasmVNC sends unprompted (another viewer joining or leaving, clipboard contents) are
   skipped instead of ending the call with "unexpected VNC message".
 

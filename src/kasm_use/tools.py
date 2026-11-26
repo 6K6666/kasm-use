@@ -68,6 +68,9 @@ _STATE_PATH: str | None = None
 # stopped (or saw end), which must not be adopted again from a copy another process still holds.
 _PERSISTED: set[str] = set()
 _STOPPED: set[str] = set()
+# Sessions this process started, claimed, or was asked for by ID. A call that names no session
+# means one of these, never a session another client process put in the shared state file.
+_MINE: set[str] = set()
 _STATE_VERSION = 1
 
 # kasm_id -> (image_width, image_height) of the last screenshot shown to the model.
@@ -76,6 +79,7 @@ _LAST_SHOT: dict[str, tuple[int, int]] = {}
 _VISIBLE: set[str] = set()
 START_READY_SECONDS = 20
 STATUS_GRACE_SECONDS = 60  # how long a status-file session may go unreported before it has failed
+STATUS_STALE_SECONDS = 900  # a queued or preparing status nobody has rewritten for this long is a dead controller
 
 
 # ----------------------------------------------------------------------------------- API
@@ -334,17 +338,24 @@ def _resolve_session(args: dict) -> str:
     """Resolve a session started by, or restored into, this kasm-use instance."""
     _load_sessions()
     with _LOCK:
-        mine = list(_SESSIONS)
+        tracked = {kid: creds["started"] for kid, creds in _SESSIONS.items()}
     requested = _kid(args.get("session_id") or "")
     if requested:
-        if requested not in mine:
+        if requested not in tracked:
             raise PermissionError(
                 "kasm-use only controls sessions tracked by this instance. "
                 "That session was not started here or recovered from its private state file.")
+        _MINE.add(requested)
         return requested
-    if not mine:
+    if not tracked:
         raise RuntimeError("No session started yet. Start one with kasm_start first.")
-    return max(mine, key=lambda k: _SESSIONS[k]["started"])
+    mine = [kid for kid in tracked if kid in _MINE]
+    if mine:
+        return max(mine, key=tracked.get)
+    if len(tracked) == 1:  # after a client restart there is nothing else the call could mean
+        return next(iter(tracked))
+    raise RuntimeError("Several sessions are tracked and this client started none of them. "
+                       "Pass session_id; kasm_list shows them.")
 
 
 def _status_file(kid: str) -> str | None:
@@ -368,9 +379,13 @@ def _session_state(kid: str) -> dict:
     try:
         with open(path, encoding="utf-8") as stream:
             status = json.loads(stream.read(65536))
-        state, detail, typing = status["phase"], status["detail"], status["typing"]
+        state, detail, typing, updated = status["phase"], status["detail"], status["typing"], status["updated"]
         if (status["session_id"] == kid and state in ("queued", "preparing", "ready", "failed")
-                and isinstance(detail, str) and typing in ("ascii", "unicode")):
+                and isinstance(detail, str) and typing in ("ascii", "unicode")
+                and isinstance(updated, (int, float)) and not isinstance(updated, bool) and math.isfinite(updated)):
+            if state in ("queued", "preparing") and time.time() - updated > STATUS_STALE_SECONDS:
+                return {"state": "failed", "detail": "The Windows controller stopped reporting this session.",
+                        "typing": typing}
             return {"state": state, "detail": detail, "typing": typing}
     except (OSError, ValueError, KeyError, TypeError):
         pass  # unreadable or malformed counts as missing
@@ -624,6 +639,7 @@ def kasm_claim_pilot(args, **kw):
         _set_connection(kid, creds, response)
         with _LOCK:
             _SESSIONS.setdefault(kid, creds)
+        _MINE.add(kid)
         # A claim is process-local. Restarting this process requires a fresh claim.
         return _ok(session_id=kid, workspace=creds["workspace"])
     except Exception as e:
@@ -678,6 +694,7 @@ def kasm_start(args, **kw):
             _SESSIONS[kid] = {"username": started["username"], "session_token": started["session_token"],
                               "workspace": img.get("friendly_name"), "started": time.time(), "transport": transport,
                               "image_id": img["image_id"]}
+            _MINE.add(kid)
         try:
             _save_sessions()
         except Exception:
@@ -727,17 +744,23 @@ def kasm_wait(args, **kw):
             return _err("timeout_seconds must be finite")
         timeout = int(max(5.0, min(timeout, 90.0)))  # a public proxy cuts idle responses at 100 s
         began = time.monotonic()
+        connected, unreachable = False, ""
         for waited in range(timeout + 1):
             if not _status_file(kid) and kid not in _VISIBLE:
                 try:
                     _shot(kid)  # a plain desktop is ready once it has drawn something
-                except Exception:
-                    pass
+                    connected = True
+                except Exception as e:
+                    unreachable = str(e)
             status = _session_state(kid)
             if (status["state"] in ("ready", "failed") or waited == timeout
                     or time.monotonic() - began >= timeout):
                 break
             time.sleep(1)
+        if not _status_file(kid) and status["state"] == "preparing":
+            # Say why, so an agent does not wait forever on a desktop that is gone.
+            status = ({"state": "preparing", "detail": "The screen is still blank."} if connected or not unreachable
+                      else {"state": "failed", "detail": f"Could not reach the desktop: {unreachable}"})
         return _ok(session_id=kid, state=status["state"], detail=status["detail"], waited_seconds=waited)
     except Exception as e:
         return _err(str(e))
@@ -845,8 +868,11 @@ def kasm_paste(args, **kw):
             time.sleep(PASTE_SETTLE_SECONDS)  # let the desktop see the new clipboard before the shortcut
             s.combo(combo)
             time.sleep(PASTE_SETTLE_SECONDS)  # the paste is served from this connection; keep it open
-        return _verify_after(kid, _ok(session_id=kid, pasted_chars=len(text), shortcut=shortcut),
-                             args.get("verify_after"))
+        return _verify_after(
+            kid,
+            _ok(session_id=kid, pasted_chars=len(text), shortcut=shortcut,
+                note="Clipboard set and shortcut sent. The desktop gives no confirmation; check with kasm_look."),
+            args.get("verify_after"))
     except Exception as e:
         return _err(str(e))
 
@@ -962,7 +988,9 @@ _TOOLS = [
     ("kasm_paste", kasm_paste,
      "Paste text into the focused field through the clipboard: fast, and exact for any characters. Sets the "
      "session's clipboard, then presses the paste shortcut. Terminals usually need shortcut \"ctrl+shift+v\". "
-     "It replaces whatever was on the session's clipboard. NEVER paste passwords, "
+     "It replaces whatever was on the session's clipboard. If the session does not allow clipboard-in "
+     "(Kasm's Allow Clipboard Up), the shortcut pastes the desktop's old clipboard instead, so check the "
+     "result. NEVER paste passwords, "
      "MFA codes, or payment details — stop and ask the owner to take over the session for those.",
      {"type": "object", "required": ["text"], "properties": {
          **_SID, "text": {"type": "string"},

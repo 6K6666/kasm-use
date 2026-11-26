@@ -83,7 +83,9 @@ def desktop(monkeypatch):
 
 def test_paste_sets_the_clipboard_then_presses_ctrl_v(desktop):
     result = json.loads(tools.kasm_paste({"session_id": SID, "text": "é ñ 日本"}))
+    note = result.pop("note")
     assert result == {"ok": True, "session_id": SID, "pasted_chars": 6, "shortcut": "ctrl+v"}
+    assert "no confirmation" in note and "kasm_look" in note  # the desktop never acknowledges a clipboard
     assert desktop.actions == [("set_clipboard", "é ñ 日本"), ("combo", [0xFFE3, ord("v")])]
 
 
@@ -134,3 +136,4 @@ def test_paste_description_warns_about_terminals_and_secrets():
     assert 'Terminals usually need shortcut "ctrl+shift+v".' in description
     warning = typed[typed.index("NEVER type"):]
     assert warning.replace("NEVER type", "NEVER paste") in description
+    assert "clipboard" in description and "old clipboard" in description  # what happens when clipboard-in is off
