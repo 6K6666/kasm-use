@@ -137,7 +137,7 @@ class Session:
 
     def _mouse(self, states, *, shift=False):
         self._eval("""({states, shift}) => {
-            if (shift) app.guac.sendKeyEvent(true, 0xffe1);
+            if (shift) app.guac.sendKeyEvent(1, 0xffe1);
             try {
                 for (const [x, y, button] of states) {
                     app.guac.sendMouseState(new Guacamole.Mouse.State(
@@ -146,7 +146,7 @@ class Session:
                 }
                 app.mouse.lastActiveAt = Date.now();
             } finally {
-                if (shift) app.guac.sendKeyEvent(false, 0xffe1);
+                if (shift) app.guac.sendKeyEvent(0, 0xffe1);
             }
         }""", {"states": states, "shift": shift})
 
@@ -169,7 +169,7 @@ class Session:
         }""", states)
 
     def combo(self, syms):
-        self._keys([(sym, True) for sym in syms] + [(sym, False) for sym in reversed(syms)])
+        self._keys([(sym, 1) for sym in syms] + [(sym, 0) for sym in reversed(syms)])
 
     def type(self, text):
-        self._keys([(char_keysym(ch), down) for ch in text for down in (True, False)])
+        self._keys([(char_keysym(ch), down) for ch in text for down in (1, 0)])

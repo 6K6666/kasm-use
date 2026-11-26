@@ -10,6 +10,11 @@ per-clone password in the supported Kasm credential configuration.
 If using Kasm Desktop Service, enroll this guest with its own registration
 token after credential cleanup.
 
+After a CSV server import, check **Connection Info** in the Server editor.
+Kasm 1.19.0-ca1 imported a populated JSON cell as a string during the pilot.
+The resulting status request returned HTTP 500 in `get_port_map`. Saving
+the value as a JSON object through the Server editor corrected the binding.
+
 The host controller owns the Dockur container, overlay, credentials, and
 endpoint. Start the private relay only after the first-boot run has proved
 OOBE completion, credential rotation, setup-account cleanup, and a working
@@ -31,6 +36,10 @@ Kasm login link for the same session and owner. The driver keeps the link
 and browser state in memory. Persisted recovery data records whether to use
 KasmVNC or Guacamole.
 
+The first Guacamole frame can show Windows signing in. Wait for the desktop
+and taskbar before sending input. Confirm a guest-side result such as text
+entered in Notepad. A successful input tool response confirms dispatch.
+
 A Kasm session ending and a host trial retiring are two steps. Wait for the
 exact Kasm session to disappear, revoke the Server binding and remove the
 relay, then retire that guest through the Dockur controller. Verify the
@@ -40,6 +49,19 @@ published Kasm 1.19 developer endpoints cover session operations. The pilot
 also needs an administrator to manage its dedicated Server and Workspace.
 See the [Kasm 1.19 developer API](https://docs.kasm.com/docs/1.19.0/reference/developer-api)
 and [fixed infrastructure guide](https://docs.kasm.com/docs/1.19.0/how-to/workspaces-sessions/server-workspace/fixed-infrastructure).
+
+## Live pilot result
+
+On November 26, 2026, the staged kasm-use image started a Windows Server
+Workspace on CT115, captured its desktop, opened Start with a click,
+entered an exact marker inside Windows, reconnected, and ended the session.
+Guacamole's key instruction requires numeric press and release states
+(`1` and `0`). Sending booleans left the Windows keyboard inactive even
+though the browser accepted the call. The Chromium regression fixture now
+rejects boolean key states.
+
+After stopping the Kasm session, the trial relay, container, writable overlay,
+and private credentials were removed and checked for absence.
 
 ## SDK2
 

@@ -106,7 +106,10 @@ def test_browser_drives_exact_guacamole_frame():
                                 flatten: () => canvas
                             }),
                             sendMouseState: (state, scaled) => events.push([state.args, scaled]),
-                            sendKeyEvent: (down, sym) => events.push([down, sym])
+                            sendKeyEvent: (down, sym) => {
+                                if (down !== 0 && down !== 1) throw Error("Guacamole expects numeric key state");
+                                events.push([down, sym]);
+                            }
                         }
                     };
                     </script>"""
@@ -136,10 +139,10 @@ def test_browser_drives_exact_guacamole_frame():
         assert events[0] == [[2, 3, True, False, False, False, False], False]
         assert events[6] == [[4, 5, False, False, True, False, False], False]
         assert events[8] == [[3, 4, False, False, False, False, True], False]
-        assert events[12] == [True, 0xffe1]
-        assert events[15] == [False, 0xffe1]
-        assert events[-6:] == [[True, 233], [False, 233], [True, 0xffe3],
-                              [True, 0x61], [False, 0x61], [False, 0xffe3]]
+        assert events[12] == [1, 0xffe1]
+        assert events[15] == [0, 0xffe1]
+        assert events[-6:] == [[1, 233], [0, 233], [1, 0xffe3],
+                              [1, 0x61], [0, 0x61], [0, 0xffe3]]
     finally:
         guac.close(SID)
         server.shutdown()
