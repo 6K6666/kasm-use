@@ -142,6 +142,7 @@ def test_start_persists_only_after_request_returns_session_id(monkeypatch, tmp_p
     saved = json.loads(path.read_text())
     assert saved["sessions"] == [{
         "session_id": SID, "username": "alice", "workspace": "Chrome", "started": tools._SESSIONS[SID]["started"],
+        "image_id": "img",
     }]
     assert "session-secret" not in path.read_text()
 

@@ -20,6 +20,9 @@ Configuration comes from the environment only:
   KASM_API_URL, KASM_API_KEY, KASM_API_KEY_SECRET  - a Kasm API key (see README for permissions)
   KASM_USER_ID       - the Kasm user sessions are created for, so the owner can watch/take over
   KASM_VERIFY_TLS    - "false" to accept a self-signed Kasm certificate (default: verify)
+  KASM_PILOT_WORKSPACE_ID, KASM_SESSION_STATUS_DIR - optional; sessions of that one workspace
+                       take their readiness from <dir>/<session_id>.json, written by whatever
+                       prepares the desktop (see README)
 
 Coordinates: every click/scroll uses the coordinate space of the most recent kasm_look image for
 that session. The desktop resizes when someone opens the session in their browser, so clicks are
@@ -62,6 +65,7 @@ _LAST_SHOT: dict[str, tuple[int, int]] = {}
 # Sessions whose desktop has drawn something at least once while this process watched.
 _VISIBLE: set[str] = set()
 START_READY_SECONDS = 20
+STATUS_GRACE_SECONDS = 60  # how long a status-file session may go unreported before it has failed
 
 
 # ----------------------------------------------------------------------------------- API
@@ -165,8 +169,9 @@ def _load_sessions() -> None:
         restored = {}
         for entry in entries:
             if (not isinstance(entry, dict)
-                or set(entry) - {"transport"} != {"session_id", "username", "workspace", "started"}
-                or entry.get("transport", "vnc") not in ("vnc", "guac")):
+                or set(entry) - {"transport", "image_id"} != {"session_id", "username", "workspace", "started"}
+                or entry.get("transport", "vnc") not in ("vnc", "guac")
+                or not isinstance(entry.get("image_id", ""), str) or len(entry.get("image_id", "")) > 200):
                 raise RuntimeError("Kasm session state contains invalid session metadata.")
             kid = _kid(entry["session_id"])
             username, workspace, started = entry["username"], entry["workspace"], entry["started"]
@@ -192,6 +197,7 @@ def _load_sessions() -> None:
                 "session_token": None,
                 "path": None,
                 **({"transport": "guac"} if entry.get("transport") == "guac" else {}),
+                **({"image_id": entry["image_id"]} if entry.get("image_id") else {}),
             }
 
         with _LOCK:
@@ -214,6 +220,7 @@ def _save_sessions() -> None:
                     "workspace": creds["workspace"],
                     "started": creds["started"],
                     **({"transport": "guac"} if creds.get("transport") == "guac" else {}),
+                    **({"image_id": creds["image_id"]} if creds.get("image_id") else {}),
                 }
                 for kid, creds in _SESSIONS.items() if not creds.get("pilot")
             ]
@@ -284,6 +291,56 @@ def _resolve_session(args: dict) -> str:
     if not mine:
         raise RuntimeError("No session started yet. Start one with kasm_start first.")
     return max(mine, key=lambda k: _SESSIONS[k]["started"])
+
+
+def _status_file(kid: str) -> str | None:
+    """Where this session's readiness is published, or None when no status file applies to it."""
+    directory = os.environ.get("KASM_SESSION_STATUS_DIR")
+    workspace = _kid(os.environ.get("KASM_PILOT_WORKSPACE_ID", ""))
+    creds = _SESSIONS.get(kid) or {}
+    if (not directory or not workspace or not re.fullmatch(r"[a-f0-9]{32}", kid)
+            or not (creds.get("pilot") or _kid(creds.get("image_id") or "") == workspace)):
+        return None
+    return os.path.join(directory, f"{kid}.json")
+
+
+def _session_state(kid: str) -> dict:
+    """{"state": queued|preparing|ready|failed, "detail": str, "typing": ascii|unicode}."""
+    creds = _SESSIONS.get(kid) or {}
+    path = _status_file(kid)
+    if path is None:
+        seen = kid in _VISIBLE or creds.get("transport") == "guac"
+        return {"state": "ready" if seen else "preparing", "detail": "", "typing": "unicode"}
+    try:
+        with open(path, encoding="utf-8") as stream:
+            status = json.loads(stream.read(65536))
+        state, detail, typing = status["phase"], status["detail"], status["typing"]
+        if (status["session_id"] == kid and state in ("queued", "preparing", "ready", "failed")
+                and isinstance(detail, str) and typing in ("ascii", "unicode")):
+            return {"state": state, "detail": detail, "typing": typing}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass  # unreadable or malformed counts as missing
+    if time.time() - creds.get("started", 0) < STATUS_GRACE_SECONDS:
+        return {"state": "preparing", "detail": "", "typing": "ascii"}
+    return {"state": "failed", "detail": "The Windows controller did not report this session.", "typing": "ascii"}
+
+
+def _ready_session(args: dict) -> str:
+    """Resolve a session for looking or input; refuse one whose status file says it is not ready.
+
+    Only a status file gates. A plain desktop that has drawn nothing yet stays usable, because a
+    screen that is legitimately one flat colour would otherwise lock the agent out for good.
+    """
+    kid = _resolve_session(args)
+    if _status_file(kid):
+        status = _session_state(kid)
+        detail = f": {status['detail'].rstrip('.')}" if status["detail"] else ""
+        if status["state"] in ("queued", "preparing"):
+            raise RuntimeError(f"Session {kid[:8]} is still preparing (state {status['state']}{detail}). "
+                               "Call kasm_wait until its state is ready.")
+        if status["state"] == "failed":
+            raise RuntimeError(f"Session {kid[:8]} failed to start{detail}. Call kasm_stop, then start a new one.")
+    return kid
 
 
 def _session(kid: str) -> vnc.Session | guac.Session:
@@ -433,7 +490,8 @@ def kasm_list(args, **kw):
                 _SESSIONS.pop(kid, None)
                 _LAST_SHOT.pop(kid, None)
                 _VISIBLE.discard(kid)
-            sessions = [{"session_id": kid, "workspace": s["workspace"], "status": running.get(kid)}
+            sessions = [{"session_id": kid, "workspace": s["workspace"], "status": running.get(kid),
+                         "state": _session_state(kid)["state"]}
                         for kid, s in _SESSIONS.items()]
             removed = len(_SESSIONS) != before
         for kid in browsers:
@@ -517,7 +575,8 @@ def kasm_start(args, **kw):
                         "'Users Auth Session' permission), so kasm-use can't control the session.")
         with _LOCK:
             _SESSIONS[kid] = {"username": started["username"], "session_token": started["session_token"],
-                              "workspace": img.get("friendly_name"), "started": time.time(), "transport": transport}
+                              "workspace": img.get("friendly_name"), "started": time.time(), "transport": transport,
+                              "image_id": img["image_id"]}
         try:
             _save_sessions()
         except Exception:
@@ -544,18 +603,46 @@ def kasm_start(args, **kw):
             time.sleep(5)
         else:
             return _err(f"Session {kid} did not reach 'running'.")
-        # shortcut: a Guacamole desktop is reported ready unseen; probing it would open a browser here.
-        ready = transport == "guac" or _wait_visible(kid, START_READY_SECONDS)
-        return _ok(session_id=kid, workspace=img.get("friendly_name"), image=img.get("name"), ready=ready,
+        if _status_file(kid):  # whatever prepares this desktop says when it is ready; the viewer's own screen does not
+            state = _session_state(kid)["state"]
+        else:
+            # shortcut: a Guacamole desktop is reported ready unseen; probing it would open a browser here.
+            state = "ready" if transport == "guac" or _wait_visible(kid, START_READY_SECONDS) else "preparing"
+        ready = state == "ready"
+        return _ok(session_id=kid, workspace=img.get("friendly_name"), image=img.get("name"), state=state, ready=ready,
                    note="Desktop is visible. Call kasm_look next." if ready
                    else "Desktop is still starting. Call kasm_wait.")
     except Exception as e:
         return _err(str(e))
 
 
-def kasm_look(args, **kw):
+def kasm_wait(args, **kw):
     try:
         kid = _resolve_session(args)
+        timeout = float(args.get("timeout_seconds", 60))
+        if not math.isfinite(timeout):
+            return _err("timeout_seconds must be finite")
+        timeout = int(max(5.0, min(timeout, 90.0)))  # a public proxy cuts idle responses at 100 s
+        began = time.monotonic()
+        for waited in range(timeout + 1):
+            if not _status_file(kid) and kid not in _VISIBLE:
+                try:
+                    _shot(kid)  # a plain desktop is ready once it has drawn something
+                except Exception:
+                    pass
+            status = _session_state(kid)
+            if (status["state"] in ("ready", "failed") or waited == timeout
+                    or time.monotonic() - began >= timeout):
+                break
+            time.sleep(1)
+        return _ok(session_id=kid, state=status["state"], detail=status["detail"], waited_seconds=waited)
+    except Exception as e:
+        return _err(str(e))
+
+
+def kasm_look(args, **kw):
+    try:
+        kid = _ready_session(args)
         delay = float(args.get("wait_seconds", 2))
         if not math.isfinite(delay):
             return _err("wait_seconds must be finite")
@@ -580,7 +667,7 @@ def kasm_look(args, **kw):
 
 def kasm_click(args, **kw):
     try:
-        kid = _resolve_session(args)
+        kid = _ready_session(args)
         button = {"left": 1, "middle": 2, "right": 3}.get(args.get("button", "left"), 1)
         with _session(kid) as s:
             s.click(*_to_desktop(kid, args["x"], args["y"], s.width, s.height), button,
@@ -592,7 +679,7 @@ def kasm_click(args, **kw):
 
 def kasm_drag(args, **kw):
     try:
-        kid = _resolve_session(args)
+        kid = _ready_session(args)
         button = {"left": 1, "middle": 2, "right": 3}.get(args.get("button", "left"), 1)
         with _session(kid) as s:
             start = _to_desktop(kid, args["from_x"], args["from_y"], s.width, s.height)
@@ -612,7 +699,7 @@ def kasm_type(args, **kw):
     if not text:
         return _err("text is required")
     try:
-        kid = _resolve_session(args)
+        kid = _ready_session(args)
         with _session(kid) as s:
             s.type(text)
             if args.get("press_enter"):
@@ -636,7 +723,7 @@ def kasm_key(args, **kw):
         return _err(f"keys must be key names like ctrl+l, Return, Tab, Escape (invalid: {bad})")
     try:
         combos = [[vnc.keysym(part) for part in k.split("+") if part] for k in keys]
-        kid = _resolve_session(args)
+        kid = _ready_session(args)
         with _session(kid) as s:
             for combo in combos:
                 s.combo(combo)
@@ -647,7 +734,7 @@ def kasm_key(args, **kw):
 
 def kasm_scroll(args, **kw):
     try:
-        kid = _resolve_session(args)
+        kid = _ready_session(args)
         amount = max(1, min(int(args.get("amount", 5)), 30))
         direction = args.get("direction", "down")
         if direction not in ("up", "down", "left", "right"):
@@ -693,7 +780,8 @@ _TOOLS = [
      {"type": "object", "required": ["session_id"], "properties": _SID}),
     ("kasm_start", kasm_start,
      "Start a Kasm workspace session (e.g. 'Chrome', 'Terminal') as the owner, so they can watch it. "
-     "Returns once the session is running; then call kasm_look. Only sessions you start can be controlled.",
+     "Returns the session's state: when it is ready call kasm_look, otherwise call kasm_wait until it is. "
+     "Only sessions you start can be controlled.",
      {"type": "object", "properties": {
          "workspace": {"type": "string", "description": "Workspace name, e.g. Chrome"},
          "persistent_profile_mode": {
@@ -702,6 +790,12 @@ _TOOLS = [
                             "Defaults to Kasm policy. Reset is intentionally not supported."
          }
      }}),
+    ("kasm_wait", kasm_wait,
+     "Wait until a session's desktop is ready to look at and use. Returns its state: ready, preparing, queued "
+     "or failed, with a detail line. Some desktops take minutes to prepare; while the state is preparing or "
+     "queued, call kasm_wait again. Each call returns within timeout_seconds.",
+     {"type": "object", "properties": {
+         **_SID, "timeout_seconds": {"type": "number", "description": "How long to wait, 5-90 (default 60)."}}}),
     ("kasm_look", kasm_look,
      "Live screenshot of your Kasm session. Look before clicking. After an action, use verify_after=true "
      "to return a screenshot with the action, or call kasm_look to inspect the result.",

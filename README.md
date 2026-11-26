@@ -53,7 +53,8 @@ MCP client are the most useful details.
 | Tool | What it does |
 | --- | --- |
 | `kasm_list` | Workspaces you can start, and your running sessions |
-| `kasm_start` | Start a workspace (e.g. `Chrome`); returns once the session is running |
+| `kasm_start` | Start a workspace; returns its `state`, and `ready: true` once the desktop has drawn |
+| `kasm_wait` | Wait until a session is ready; returns its state (`ready`, `preparing`, `queued`, `failed`) |
 | `kasm_look` | Live screenshot of the session, returned as an image (~1 s) |
 | `kasm_click` | Click at x,y in the latest screenshot's coordinates |
 | `kasm_drag` | Drag from one point to another with the button held (menus, windows, sliders, drag and drop) |
@@ -93,6 +94,8 @@ Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, 
 | `KASM_VERIFY_TLS` | no | `false` to accept a self-signed Kasm certificate (default `true`) |
 | `KASM_SESSION_STATE_FILE` | no | private JSON file for reconnecting to tracked sessions after a kasm-use restart; stores no login tokens |
 | `KASM_USE_TOKEN` | HTTP only | bearer token clients must send |
+| `KASM_PILOT_WORKSPACE_ID` | no | image ID of one workspace whose desktops are prepared by an outside controller (see [Slow-starting workspaces](#slow-starting-workspaces)) |
+| `KASM_SESSION_STATUS_DIR` | no | directory where that controller publishes `<session_id>.json` for each of that workspace's sessions |
 
 For restart recovery, use an absolute path in a directory owned by the kasm-use OS user with mode `0700`. The state file is created as mode `0600`. Use a separate file for each kasm-use process.
 
@@ -228,6 +231,29 @@ The connection link is kept in memory. If Kasm displays an RDP login form,
 complete login through the owner's Kasm browser. The tools do not collect
 Windows passwords. Horizontal scroll sends Shift+wheel. Use the application's scrollbar if it
 does not support that shortcut.
+
+### Slow-starting workspaces
+
+Kasm reports a session as running as soon as its container is up. Most desktops draw within a few
+seconds: `kasm_start` waits up to 20 s for the first non-blank frame and returns `ready: true`, and
+`kasm_look` says so when the screen is still blank.
+
+Some workspaces are only a viewer for something that takes minutes to prepare (a virtual machine
+that has to boot, for example). For one such workspace, set `KASM_PILOT_WORKSPACE_ID` to its image
+ID and `KASM_SESSION_STATUS_DIR` to a directory its controller writes to. For each session the
+controller publishes `<session_id>.json` (the 32-character ID, no dashes):
+
+```json
+{"session_id": "…", "phase": "preparing", "detail": "Signing in", "typing": "ascii", "updated": 1700000000.0}
+```
+
+`phase` is `queued`, `preparing`, `ready` or `failed`. `typing` is `ascii` when the desktop can only
+receive ASCII keystrokes, otherwise `unicode`. While the phase is `queued` or `preparing`, `kasm_look`
+and the input tools refuse with an error that names the state and points to `kasm_wait`; `failed`
+returns the controller's `detail`. A file that is missing, unreadable or malformed counts as
+`preparing` for the first 60 s of the session and as `failed` after that, so a controller that is
+down does not leave an agent waiting forever. `kasm_stop` works in every state. Sessions of every
+other workspace ignore the directory.
 
 ### Container Workspaces
 
