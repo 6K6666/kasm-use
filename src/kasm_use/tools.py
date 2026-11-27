@@ -6,7 +6,8 @@ Container desktops use the KasmVNC proxy. Server Workspaces use the optional
 Guacamole browser transport for screenshots and input.
 
 Scope: tools control tracked sessions only. A configured pilot may explicitly claim its own
-dashboard sessions from one workspace. Two Kasm facts make
+dashboard sessions from one workspace, and an instance that sets KASM_ATTACH may take over any
+running session its own Kasm user launched from the dashboard. Two Kasm facts make
 that the important boundary:
 - A Kasm API key is server-wide. With the permissions kasm-use needs it can list, view and stop any
   user's sessions, and "Users Auth Session" lets it log in on behalf of any user.
@@ -22,6 +23,9 @@ Configuration comes from the environment only:
   KASM_VERIFY_TLS    - "false" to accept a self-signed Kasm certificate (default: verify)
   KASM_WORKSPACE_ALLOW - optional comma-separated workspace names; only these are listed and startable
   KASM_USE_SCREEN    - optional WIDTHxHEIGHT asked of each new desktop (default: the image's own size)
+  KASM_ATTACH        - "true" lets kasm_attach take over sessions KASM_USER_ID launched from the
+                       dashboard, and kasm_list show them (default: off). Meant for an account
+                       that exists for the agent: every session of that user becomes reachable.
   KASM_PILOT_WORKSPACE_ID, KASM_SESSION_STATUS_DIR - optional; sessions of that one workspace
                        take their readiness from <dir>/<session_id>.json, written by whatever
                        prepares the desktop (see README)
@@ -302,7 +306,7 @@ def _save_sessions() -> None:
                         **({"transport": "guac"} if creds.get("transport") == "guac" else {}),
                         **({"image_id": creds["image_id"]} if creds.get("image_id") else {}),
                     }
-                    for kid, creds in _SESSIONS.items() if not creds.get("pilot")
+                    for kid, creds in _SESSIONS.items() if not (creds.get("pilot") or creds.get("attached"))
                 ]
             payload = {"version": _STATE_VERSION, "user_id": _user(), "sessions": sessions}
             fd, temporary = tempfile.mkstemp(prefix=".sessions-", dir=os.path.dirname(path))
@@ -528,7 +532,7 @@ def _set_connection(kid: str, creds: dict, response: dict) -> None:
     if response_owner and _kid(response_owner) != _kid(_user()):
         raise RuntimeError("Kasm returned a connection link that did not match this session and owner.")
 
-    if creds.get("transport") == "guac" or creds.get("pilot"):
+    if creds.get("transport") == "guac" or creds.get("pilot") or creds.get("attached"):
         relative = path.strip("/").split("/")
         if (parsed.scheme or parsed.netloc or parsed.path not in ("", "/") or parsed.query
                 or len(relative) != 3 or relative[::2] != ["desktop", "vnc"]
@@ -687,7 +691,8 @@ def kasm_list(args, **kw):
         _load_sessions()
         images = [{"workspace": i.get("friendly_name"), "image": i.get("name")}
                   for i in _allowed(_call("get_images").get("images", [])) if i.get("enabled")]
-        running = {_kid(k["kasm_id"]): k.get("operational_status") for k in _call("get_kasms").get("kasms", [])}
+        kasms = _call("get_kasms").get("kasms", [])
+        running = {_kid(k["kasm_id"]): k.get("operational_status") for k in kasms}
         with _LOCK:
             before = len(_SESSIONS)
             expired = [k for k in _SESSIONS if k not in running]
@@ -705,8 +710,15 @@ def kasm_list(args, **kw):
             guac.close(kid)
         if removed:
             _save_sessions()
-        return _ok(workspaces=images, sessions=sessions,
-                   note="Only sessions tracked by this kasm-use instance are listed or controllable.")
+        if not _attach_enabled():
+            return _ok(workspaces=images, sessions=sessions,
+                       note="Only sessions tracked by this kasm-use instance are listed or controllable.")
+        attachable = [{"session_id": _kid(k["kasm_id"]), "workspace": (k.get("image") or {}).get("friendly_name")}
+                      for k in kasms if _kid(k.get("user_id") or "") == _kid(_user())
+                      and k.get("operational_status") == "running" and _kid(k["kasm_id"]) not in _SESSIONS]
+        return _ok(workspaces=images, sessions=sessions, attachable=attachable,
+                   note="Only sessions tracked by this kasm-use instance are controllable. Those under attachable were "
+                        "launched from the Kasm dashboard by this instance's own user: kasm_attach takes one over.")
     except Exception as e:
         return _err(str(e))
 
@@ -744,6 +756,53 @@ def kasm_claim_pilot(args, **kw):
         _MINE.add(kid)
         # A claim is process-local. Restarting this process requires a fresh claim.
         return _ok(session_id=kid, workspace=creds["workspace"])
+    except Exception as e:
+        return _err(str(e))
+
+
+def _attach_enabled() -> bool:
+    return os.environ.get("KASM_ATTACH", "").lower() in ("1", "true", "yes")
+
+
+def kasm_attach(args, **kw):
+    """Take over a running session this instance's own Kasm user launched from the dashboard."""
+    try:
+        if not _attach_enabled():
+            return _err("Attaching to dashboard sessions is not enabled for this kasm-use instance.")
+        kid = _kid(args.get("session_id") or "")
+        if not re.fullmatch(r"[a-f0-9]{32}", kid):
+            return _err("Give the session_id of an attachable session from kasm_list.")
+        _load_sessions()
+        with _LOCK:
+            creds = _SESSIONS.get(kid)
+        if creds is None:
+            # Kasm's status call is made for the owner and answers with a login link for the owner;
+            # _set_connection refuses a link that names another session or another user.
+            response = _call("get_kasm_status", kasm_id=kid, user_id=_user())
+            found = response.get("kasm") or {}
+            if (_kid(found.get("kasm_id") or "") != kid or _kid(found.get("user_id") or "") != _kid(_user())
+                    or found.get("operational_status") != "running"):
+                return _err("No running session of this instance's Kasm user has that ID.")
+            image = found.get("image") or {}
+            if image.get("image_type") not in (None, "Container"):
+                return _err("Only container workspaces can be attached.")
+            username = found.get("username")
+            if not isinstance(username, str) or not re.fullmatch(r"[A-Za-z0-9_.@+-]{1,200}", username):
+                return _err("Kasm did not name this session's user.")
+            creds = {"username": username, "workspace": image.get("friendly_name") or "Kasm session",
+                     "started": time.time(), "transport": "vnc", "attached": True,
+                     **({"image_id": found["image_id"]} if isinstance(found.get("image_id"), str) else {})}
+            _set_connection(kid, creds, response)
+            with _LOCK:
+                creds = _SESSIONS.setdefault(kid, creds)
+                _STOPPED.discard(kid)
+        _MINE.add(kid)
+        # An attachment is process-local, like a pilot claim: it is never written to the state file.
+        state = _session_state(kid)["state"] if _status_file(kid) else "ready"
+        return _ok(session_id=kid, workspace=creds["workspace"], state=state,
+                   note="The owner launched this session and may be signed in to things in it: do only what "
+                        "they asked. " + ("Call kasm_look next." if state == "ready" else "Call kasm_wait until it is ready.")
+                        + " kasm_stop releases it without ending it.")
     except Exception as e:
         return _err(str(e))
 
@@ -1044,6 +1103,16 @@ def kasm_scroll(args, **kw):
 def kasm_stop(args, **kw):
     try:
         kid = _resolve_session(args)
+        if (_SESSIONS.get(kid) or {}).get("attached"):
+            # The owner launched it and may have work in it; ending it is theirs to do.
+            with _LOCK:
+                _SESSIONS.pop(kid, None)
+                _LAST_SHOT.pop(kid, None)
+                _VISIBLE.discard(kid)
+                _MINE.discard(kid)
+            return _ok(session_id=kid, stopped=False, released=True,
+                       note="The owner launched this session, so it was released, not ended. It is still running; "
+                            "the owner can end it from the Kasm dashboard.")
         note = {}
         try:
             _call("destroy_kasm", kasm_id=kid, user_id=_user())
@@ -1078,13 +1147,22 @@ _SID = {"session_id": {"type": "string",
 _VERIFY = "Return a screenshot with the result, taken once the screen has stopped changing (up to 4 s)."
 
 _TOOLS = [
-    ("kasm_list", kasm_list, "List Kasm workspaces you can start, and the sessions you started.",
+    ("kasm_list", kasm_list,
+     "List Kasm workspaces you can start, the sessions you control, and (where enabled) the owner's "
+     "dashboard sessions you could take over with kasm_attach.",
      {"type": "object", "properties": {}}),
     ("kasm_claim_pilot", kasm_claim_pilot,
      "Attach to a running Windows pilot session launched from the dashboard by this instance's configured owner.",
      {"type": "object", "required": ["session_id"], "properties": {"session_id": {
          "type": "string",
          "description": "The 32-character id of a Windows session the owner launched from the Kasm dashboard."}}}),
+    ("kasm_attach", kasm_attach,
+     "Take control of a running session that the owner launched from the Kasm dashboard under this instance's "
+     "own Kasm user, for example a desktop where they have already signed in to a website. kasm_list shows "
+     "these under attachable. The owner can keep using it too. Whatever they are signed in to there is in "
+     "your hands: do only what they asked. kasm_stop releases an attached session without ending it.",
+     {"type": "object", "required": ["session_id"], "properties": {"session_id": {
+         "type": "string", "description": "A session_id listed under attachable by kasm_list."}}}),
     ("kasm_start", kasm_start,
      "Start a session of one of the workspaces kasm_list shows, as the owner, so they can watch it. "
      "Returns the session's state: when it is ready call kasm_look, otherwise call kasm_wait until it is. "
@@ -1155,7 +1233,9 @@ _TOOLS = [
          "amount": {"type": "integer", "description": "Wheel clicks, 1-30 (default 5)"},
          "x": {"type": "integer"}, "y": {"type": "integer"},
          "verify_after": {"type": "boolean", "description": _VERIFY}}}),
-    ("kasm_stop", kasm_stop, "Stop (destroy) a session you started, when the task is finished or the owner asks.",
+    ("kasm_stop", kasm_stop,
+     "Stop (destroy) a session you started, when the task is finished or the owner asks. A session you "
+     "attached to is released instead and keeps running.",
      {"type": "object", "properties": {**_SID}}),
 ]
 

@@ -53,6 +53,7 @@ MCP client are the most useful details.
 | Tool | What it does |
 | --- | --- |
 | `kasm_list` | Workspaces you can start, and your running sessions |
+| `kasm_attach` | Take over a running session the owner launched from the Kasm dashboard under the instance's own user (off unless `KASM_ATTACH=true`; see [Security model](#security-model)) |
 | `kasm_start` | Start a workspace; returns its `state`, and `ready: true` once the desktop has drawn |
 | `kasm_wait` | Wait until a session is ready; returns its state (`ready`, `preparing`, `queued`, `failed`) |
 | `kasm_look` | Live screenshot of the session, returned as an image (~1 s) |
@@ -62,7 +63,7 @@ MCP client are the most useful details.
 | `kasm_paste` | Paste text through the session clipboard: fast, exact for any characters. Needs **Allow Clipboard Up** for the user's Kasm group; KasmVNC does not confirm a clipboard, so check the result |
 | `kasm_key` | Keys/shortcuts, e.g. `ctrl+l`, `Return`, `Tab`, `ctrl+plus`; the tool description lists every key name |
 | `kasm_scroll` | Scroll, optionally at a point |
-| `kasm_stop` | Destroy the session |
+| `kasm_stop` | Destroy the session. An attached session is released instead and keeps running |
 
 Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, or `kasm_scroll` to return a screenshot with the action result. It is taken once the screen has stopped changing: kasm-use looks every half second until two looks agree (a blinking cursor counts as still), for 4 seconds at most, and the result says `settled` and `waited_seconds`. A program that takes seconds to open may still appear later; call `kasm_look` for it. Inspect the screenshot to decide whether the action worked.
 
@@ -99,6 +100,7 @@ What a call costs on the server (measured 2026-11-27 on an Ubuntu Noble session,
 | `KASM_USE_TOKEN` | HTTP only | bearer token clients must send |
 | `KASM_WORKSPACE_ALLOW` | no | comma-separated workspace names, e.g. `Ubuntu Noble,Chrome`; `kasm_list` shows only these and `kasm_start` refuses the rest. Unset allows every enabled workspace |
 | `KASM_USE_SCREEN` | no | `WIDTHxHEIGHT` (each 640–2560) asked of every new desktop when it starts, e.g. `1280x800`; unset keeps the image's size (usually 1024x768). A browser that opens the session still resizes it to its window |
+| `KASM_ATTACH` | no | `true` lets `kasm_attach` take over sessions `KASM_USER_ID` launched from the dashboard, and makes `kasm_list` show them as `attachable`. Use it only where that Kasm user exists for the agent: every running session of the user becomes reachable |
 | `KASM_PILOT_WORKSPACE_ID` | no | image ID of one workspace whose desktops are prepared by an outside controller (see [Slow-starting workspaces](#slow-starting-workspaces)) |
 | `KASM_SESSION_STATUS_DIR` | no | directory where that controller publishes `<session_id>.json` for each of that workspace's sessions |
 | `KASM_STATUS_WORKSPACE_IDS` | no | comma-separated image IDs of further workspaces whose sessions read status files from the same directory (a second controller) |
@@ -190,6 +192,14 @@ So the boundary is kasm-use itself:
   started since process start. To recover across restarts, set `KASM_SESSION_STATE_FILE` to a file in
   an owner-only directory; it records session IDs and display metadata, never login tokens, and is
   bound to `KASM_USER_ID`. Any other `session_id` is refused, including for `kasm_look` and `kasm_stop`.
+- **`KASM_ATTACH=true` widens that on purpose** to every running session of `KASM_USER_ID`: the
+  agent can list them and take one over with `kasm_attach`. That is the hand-over the option
+  exists for (the owner launches a desktop, signs in to a site there, and lets the agent work in
+  it without sharing a credential), and it means anything the owner is signed in to in any session
+  of that user is within the agent's reach. Give the agent a Kasm user of its own. kasm-use checks
+  that Kasm reports the session as running and owned by that user and that the connection link
+  names that session and user; it never ends an attached session (`kasm_stop` releases it), and
+  it keeps attachments out of the state file.
 - If VNC rejects a login, kasm-use asks Kasm for a fresh connection URL, checks that it names the
   same session and owner, then retries the connection once before sending any input.
 - **The model never sees the API key or any token**, only the nine tools.

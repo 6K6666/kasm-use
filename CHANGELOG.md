@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.8 — 2026-11-27
+
+- **`kasm_attach`: take over a session the owner launched from the dashboard.** The owner starts a
+  desktop under the instance's own Kasm user, signs in to something there, and hands the desktop
+  to the agent without sharing a credential. Until now only Windows pilot sessions could be
+  claimed; an Ubuntu session prepared this way was out of reach (found by ChatGPT). Off unless
+  `KASM_ATTACH=true`. With it on, `kasm_list` shows the user's untracked running sessions under
+  `attachable`. The session must be running, belong to `KASM_USER_ID` and be a container
+  workspace; Kasm's connection link is checked against the session and the user as for a pilot.
+  `kasm_stop` **releases** an attached session and never ends it, and an attachment is not written
+  to the state file, so no other client process can mistake it for a session kasm-use may end.
+
 ## 0.5.7 — 2026-11-27
 
 Found by a usability stress test of Ubuntu Noble, Windows 11 and macOS Sequoia desktops, driven by

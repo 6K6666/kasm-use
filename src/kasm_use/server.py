@@ -23,7 +23,8 @@ HANDLERS = {name: fn for name, fn, _, _ in tools._TOOLS}
 server = Server("kasm", version=__version__, instructions=(
     "Operate Kasm Workspaces desktops. Typical loop: kasm_start -> kasm_wait until state is ready -> "
     "kasm_look -> act (click/drag/type/key/scroll) -> kasm_look to confirm. A running session from "
-    "kasm_list can be reused. "
+    "kasm_list can be reused, and one it lists as attachable (launched by the owner from the Kasm "
+    "dashboard) can be taken over with kasm_attach. "
     "Never type passwords, MFA codes or payment details; stop and ask the owner to take over. "
     "Stop at CAPTCHAs and hand them to the owner. Call kasm_stop when done."))
 

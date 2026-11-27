@@ -7,12 +7,12 @@
     "url": "https://github.com/rchurro/kasm-use",
     "source": "github"
   },
-  "version": "0.5.7",
+  "version": "0.5.8",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "kasm-use",
-      "version": "0.5.7",
+      "version": "0.5.8",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
