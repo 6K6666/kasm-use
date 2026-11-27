@@ -97,8 +97,10 @@ def kasm_page(paint):
                 html = """<div id="display"></div><script>
                     const canvas = document.createElement("canvas");
                     canvas.width = 23; canvas.height = 19;
-                    const draw = () => { const c = canvas.getContext("2d"); c.fillStyle = "#285d8d"; c.fillRect(0, 0, 23, 19); };
-                    window.events = [];
+                    const fill = (colour, width) => { const c = canvas.getContext("2d"); c.fillStyle = colour; c.fillRect(0, 0, width, 19); };
+                    const black = () => fill("#000000", 23);  // what Windows sends first: drawn, but one flat colour
+                    const draw = () => { fill("#285d8d", 23); fill("#ffffff", 5); window.drawnAt = performance.now(); };
+                    window.events = []; window.stamps = [];
                     const Guacamole = { Mouse: { State: class {
                         constructor(...args) { this.args = args; }
                     }}};
@@ -109,9 +111,10 @@ def kasm_page(paint):
                                 getWidth: () => 23, getHeight: () => 19,
                                 flatten: () => canvas
                             }),
-                            sendMouseState: (state, scaled) => events.push([state.args, scaled]),
+                            sendMouseState: (state, scaled) => { stamps.push(performance.now()); events.push([state.args, scaled]); },
                             sendKeyEvent: (down, sym) => {
                                 if (down !== 0 && down !== 1) throw Error("Guacamole expects numeric key state");
+                                stamps.push(performance.now());
                                 events.push([down, sym]);
                             }
                         }
@@ -157,8 +160,9 @@ def drawn_pixels(png):
     }""", base64.b64encode(png).decode())).result()
 
 
-def test_browser_drives_exact_guacamole_frame():
+def test_browser_drives_exact_guacamole_frame(monkeypatch):
     """Run with the guac extra and installed Chromium."""
+    monkeypatch.setattr(guac, "INPUT_SETTLE_SECONDS", 0)
     with kasm_page("draw();") as url:
         with guac.Session(SID, url, PATH, True) as desktop:
             assert desktop.screenshot().startswith(b"\x89PNG\r\n\x1a\n")
@@ -190,13 +194,54 @@ def test_screenshot_waits_for_the_first_frame_after_attaching():
             assert desktop.blank is False
 
 
-def test_screenshot_says_blank_when_no_frame_ever_arrives(monkeypatch):
+@pytest.mark.parametrize("paint", ["", "black();"])
+def test_screenshot_says_blank_when_no_frame_ever_arrives(monkeypatch, paint):
     monkeypatch.setattr(guac, "FIRST_FRAME_SECONDS", 1)
-    with kasm_page("") as url:
+    with kasm_page(paint) as url:
         with guac.Session(SID, url, PATH, True) as desktop:
             png = desktop.screenshot()  # still returns what there is, after the wait
             assert png.startswith(b"\x89PNG\r\n\x1a\n")
             assert desktop.blank is True
+
+
+def test_screenshot_waits_past_the_flat_black_frame_windows_sends_first():
+    """Seen live on 2026-11-27: the first frame of a Windows RDP session is solid black, then the
+    desktop follows. One flat colour is not a desktop yet, as for the VNC transport."""
+    with kasm_page("black(); setTimeout(draw, 700);") as url:
+        with guac.Session(SID, url, PATH, True) as desktop:
+            desktop.screenshot()
+            assert desktop.blank is False
+            assert desktop._eval("() => window.drawnAt > 0")
+
+
+def test_a_flat_screen_later_on_is_reported_without_waiting(monkeypatch):
+    import time
+
+    with kasm_page("draw(); setTimeout(black, 300);") as url:
+        with guac.Session(SID, url, PATH, True) as desktop:
+            desktop.screenshot()  # the desktop has been seen once
+            time.sleep(0.5)
+            began = time.monotonic()
+            desktop.screenshot()
+            assert desktop.blank is True
+            assert time.monotonic() - began < 1  # only a new attach waits for its first frame
+
+
+def test_input_right_after_attaching_waits_until_the_desktop_can_take_it(monkeypatch):
+    """Seen live on 2026-11-27: Windows silently dropped everything typed in the first second after
+    the browser attached (4 of 4 at 0 to 1 s), and took everything typed 3 s later."""
+    import time
+
+    monkeypatch.setattr(guac, "INPUT_SETTLE_SECONDS", 0.6)
+    with kasm_page("black(); setTimeout(draw, 500);") as url:
+        with guac.Session(SID, url, PATH, True) as desktop:
+            desktop.type("a")  # no screenshot first
+            first, drawn = desktop._eval("() => [window.stamps[0], window.drawnAt]")
+            assert first - drawn >= 550  # ms after the first real frame
+            began = time.monotonic()
+            desktop.click(2, 3, 1, 1)
+            desktop.type("b")
+            assert time.monotonic() - began < 0.4  # only the first input after an attach waits
 
 
 def test_look_says_when_a_guacamole_desktop_has_drawn_nothing(monkeypatch):
@@ -216,6 +261,21 @@ def test_look_says_when_a_guacamole_desktop_has_drawn_nothing(monkeypatch):
     monkeypatch.setattr(tools, "_session", lambda kid: Empty())
     monkeypatch.setattr(tools.time, "sleep", lambda *_: None)
     assert "Screen is blank" in tools.kasm_look({"session_id": SID})["content"][0]["text"]
+
+
+def test_key_events_are_paced_so_windows_keeps_shift_and_unicode(monkeypatch):
+    """Measured in Notepad on Windows 11, 2026-11-27: with no pause between key events "<ok> (a)"
+    arrived as ",ok. 9a0" and the text was cut short; 5 ms still lost characters; 20 ms was exact."""
+    monkeypatch.setattr(guac, "INPUT_SETTLE_SECONDS", 0)
+    assert guac.KEY_DELAY_MS == 20
+    with kasm_page("draw();") as url:
+        with guac.Session(SID, url, PATH, True) as desktop:
+            desktop.type("<é")
+            desktop.combo([0xffe3, 0x61])
+            stamps, events = desktop._eval("() => [window.stamps, window.events]")
+    assert events == [[1, 0x3c], [0, 0x3c], [1, 0xe9], [0, 0xe9], [1, 0xffe3], [1, 0x61], [0, 0x61], [0, 0xffe3]]
+    gaps = [later - earlier for earlier, later in zip(stamps, stamps[1:])]
+    assert min(gaps) >= guac.KEY_DELAY_MS - 1
 
 
 def test_browser_transport_restores_without_link_or_token(monkeypatch, tmp_path):

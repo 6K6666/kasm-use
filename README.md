@@ -235,6 +235,12 @@ complete login through the owner's Kasm browser. The tools do not collect
 Windows passwords. Horizontal scroll sends Shift+wheel. Use the application's scrollbar if it
 does not support that shortcut.
 
+Typing goes at about 25 characters a second, and the first click or keystroke after kasm-use
+attaches to the desktop is held for a few seconds: Windows drops faster or earlier input. There is
+no clipboard on this transport, so `kasm_paste` is refused; `kasm_type` handles any character.
+After a reconnect Windows Terminal can keep showing its old contents until its window is resized
+(maximise it with `super+up`); other applications repaint by themselves.
+
 ### Slow-starting workspaces
 
 Kasm reports a session as running as soon as its container is up. Most desktops draw within a few

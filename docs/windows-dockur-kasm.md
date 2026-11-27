@@ -63,6 +63,25 @@ rejects boolean key states.
 After stopping the Kasm session, the trial relay, container, writable overlay,
 and private credentials were removed and checked for absence.
 
+## Live result, kasm-use 0.5.3
+
+On November 27, 2026 a fresh Windows 11 guest (the released image, started outside the dashboard
+service so that Guacamole was its only RDP client) was driven through a temporary Server Workspace
+with a throwaway local account. What was seen, and what kasm-use does about it:
+
+| Behaviour | Result |
+| --- | --- |
+| First frames after `kasm_start` | Windows sign-in screen ("Just a moment…"), then the desktop about 40 s later for a new profile |
+| First frame after each attach | Solid black; reported as blank since 0.5.3 |
+| Input within about 1 s of an attach | Dropped by Windows (6 of 6); held for 3 s since 0.5.3 (6 of 6 arrive) |
+| Typing into PowerShell | ASCII punctuation and `é € 日本 ñ ü ß — “x”` byte for byte, read back from the guest |
+| Typing into Notepad in one burst | Shift and Unicode lost; exact with 20 ms between key events (0.5.3) |
+| `super+r`, `alt+f4`, `ctrl+shift+escape`, `super`, `super+up`, `alt+tab`, `ctrl+a`, `ctrl+c` | Work |
+| Click, double-click, right-click, drag, wheel scroll | Work |
+| `kasm_paste` | Refused with "This workspace's connection has no clipboard. Use kasm_type." |
+| A new client process | Reconnects to the same Windows session with its windows open |
+| Windows Terminal after a reconnect | Keeps its old picture until the window is resized; Notepad repaints by itself |
+
 ## SDK2
 
 **Desktop interaction needs zero SDK2 changes.** Route look and input through

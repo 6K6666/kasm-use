@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.3 — 2026-11-27
+
+Found by driving a Windows 11 desktop through a Server (Guacamole) workspace; all three were
+measured there and are covered by browser tests.
+
+- **Typing no longer loses Shift or Unicode characters on Windows.** Key events were sent in one
+  burst; Notepad received `<ok> (a)` as `,ok. 9a0` and cut the text short. Each key event is now
+  followed by a 20 ms pause (about 25 characters a second), which was byte-exact.
+- **The first input after attaching is no longer dropped.** Windows ignored everything sent within
+  about a second of a new RDP connection showing its desktop. The first click or keystroke after an
+  attach now waits until 3 s after the first drawn frame.
+- **A solid black first frame counts as blank.** Windows sends one before the desktop; the
+  screenshot now waits for a frame that is not one flat colour (a new attach only), and `kasm_look`
+  says "Screen is blank" when none arrives.
+
 ## 0.5.2 — 2026-11-27
 
 - **The first screenshot of a Server (Guacamole) desktop is no longer empty.** Right after the

@@ -3,6 +3,7 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import struct
+import time
 from urllib.parse import urlsplit
 
 from .vnc import char_keysym
@@ -21,16 +22,29 @@ _READY = """() => typeof app !== 'undefined' && app.isConnected() &&
 """
 
 
-# Right after the browser attaches, the display has its size but no frame yet: flattening it gives a
-# fully transparent image. Wait for the first drawn pixel; a display that has one answers at once.
+# Right after the browser attaches, the display has its size but no frame yet (flattening it gives
+# a fully transparent image), and Windows then sends one solid black frame before the desktop.
+# A frame of one flat colour is "not drawn", as for the VNC transport. A new attach waits this long
+# for its first drawn frame; afterwards a flat screen is reported at once.
 FIRST_FRAME_SECONDS = 8
+# Windows drops input sent in the first moments after an RDP connection shows its desktop (measured
+# 2026-11-27: everything typed within 1 s was lost, everything typed 3 s later arrived). The first
+# input after an attach waits until this long after the first drawn frame.
+INPUT_SETTLE_SECONDS = 3
+# Pause after every key event. Sent in one burst, Windows applications that read the keyboard
+# state late lose Shift and Unicode characters (Notepad, measured 2026-11-27: 0 and 5 ms corrupt
+# the text, 20 ms is exact). About 25 characters a second.
+KEY_DELAY_MS = 20
+_fresh = set()  # sessions whose browser attached and has not sent input yet
+_drawn_at = {}  # for those: when the first drawn frame was seen
 _FRAME = """async limit => {
     const display = app.guac.getDisplay(), deadline = Date.now() + limit;
     for (;;) {
         const canvas = display.flatten();
-        const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+        const p = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
         let drawn = false;
-        for (let i = 3; i < pixels.length && !drawn; i += 4) drawn = pixels[i] !== 0;
+        for (let i = 4; i < p.length && !drawn; i += 4)
+            drawn = p[i] !== p[0] || p[i + 1] !== p[1] || p[i + 2] !== p[2] || p[i + 3] !== p[3];
         if (drawn || Date.now() >= deadline) return [drawn, canvas.toDataURL('image/png').split(',')[1]];
         await new Promise(resolve => setTimeout(resolve, 200));
     }
@@ -102,6 +116,8 @@ def _get_frame(kid, url, path, verify_tls):
         frame.wait_for_url(matches)
         frame.wait_for_function(_READY)
         _pages[kid] = context, frame
+        _fresh.add(kid)
+        _drawn_at.pop(kid, None)
         return frame
     except Exception:
         context.close()
@@ -111,6 +127,8 @@ def _get_frame(kid, url, path, verify_tls):
 def close(kid):
     def close_context():
         entry = _pages.pop(kid, None)
+        _fresh.discard(kid)
+        _drawn_at.pop(kid, None)
         if entry is not None:
             entry[0].close()
 
@@ -143,14 +161,34 @@ class Session:
             # Playwright errors can include the session-token URL.
             raise ConnectionError("Kasm Guacamole desktop is disconnected or awaiting RDP login.") from None
 
+    def _frame(self):
+        kid = self.target[0]
+        waiting = kid in _fresh and kid not in _drawn_at
+        drawn, data = self._eval(_FRAME, FIRST_FRAME_SECONDS * 1000 if waiting else 0)
+        if drawn and kid in _fresh:
+            _drawn_at.setdefault(kid, time.monotonic())
+        return drawn, data
+
     def screenshot(self):
-        drawn, data = self._eval(_FRAME, FIRST_FRAME_SECONDS * 1000)
+        drawn, data = self._frame()
         self.blank = not drawn  # kasm_look says so, as for a VNC desktop that has drawn nothing
         png = base64.b64decode(data)
         self.width, self.height = struct.unpack(">II", png[16:24])
         return png
 
+    def _settle(self):
+        """Hold the first input after an attach until the desktop can take it."""
+        kid = self.target[0]
+        if kid not in _fresh:
+            return
+        if kid not in _drawn_at:
+            self._frame()
+        if kid in _drawn_at:  # a desktop that never drew gets the input anyway, and waits again next time
+            time.sleep(max(0.0, _drawn_at[kid] + INPUT_SETTLE_SECONDS - time.monotonic()))
+            _fresh.discard(kid)
+
     def _mouse(self, states, *, shift=False):
+        self._settle()
         self._eval("""({states, shift}) => {
             if (shift) app.guac.sendKeyEvent(1, 0xffe1);
             try {
@@ -178,10 +216,14 @@ class Session:
                     shift=direction in ("left", "right"))
 
     def _keys(self, states):
-        self._eval("""states => {
-            for (const [sym, down] of states) app.guac.sendKeyEvent(down, sym);
+        self._settle()
+        self._eval("""async ({states, delay}) => {
+            for (const [sym, down] of states) {
+                app.guac.sendKeyEvent(down, sym);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
             app.keyboard.lastActiveAt = Date.now();
-        }""", states)
+        }""", {"states": states, "delay": KEY_DELAY_MS})
 
     def combo(self, syms):
         self._keys([(sym, 1) for sym in syms] + [(sym, 0) for sym in reversed(syms)])
