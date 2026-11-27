@@ -99,6 +99,7 @@ Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, 
 | `KASM_USE_SCREEN` | no | `WIDTHxHEIGHT` (each 640–2560) asked of every new desktop when it starts, e.g. `1280x800`; unset keeps the image's size (usually 1024x768). A browser that opens the session still resizes it to its window |
 | `KASM_PILOT_WORKSPACE_ID` | no | image ID of one workspace whose desktops are prepared by an outside controller (see [Slow-starting workspaces](#slow-starting-workspaces)) |
 | `KASM_SESSION_STATUS_DIR` | no | directory where that controller publishes `<session_id>.json` for each of that workspace's sessions |
+| `KASM_STATUS_WORKSPACE_IDS` | no | comma-separated image IDs of further workspaces whose sessions read status files from the same directory (a second controller) |
 
 For restart recovery, use an absolute path in a directory owned by the kasm-use OS user with mode `0700`. The state file is created as mode `0600`. Use a separate file for each kasm-use process.
 
@@ -259,7 +260,8 @@ seconds: `kasm_start` waits up to 20 s for the first non-blank frame and returns
 
 Some workspaces are only a viewer for something that takes minutes to prepare (a virtual machine
 that has to boot, for example). For one such workspace, set `KASM_PILOT_WORKSPACE_ID` to its image
-ID and `KASM_SESSION_STATUS_DIR` to a directory its controller writes to. For each session the
+ID and `KASM_SESSION_STATUS_DIR` to a directory its controller writes to. List the image IDs of
+any further such workspaces in `KASM_STATUS_WORKSPACE_IDS`. For each session the
 controller publishes `<session_id>.json` (the 32-character ID, no dashes):
 
 ```json

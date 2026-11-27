@@ -25,6 +25,7 @@ Configuration comes from the environment only:
   KASM_PILOT_WORKSPACE_ID, KASM_SESSION_STATUS_DIR - optional; sessions of that one workspace
                        take their readiness from <dir>/<session_id>.json, written by whatever
                        prepares the desktop (see README)
+  KASM_STATUS_WORKSPACE_IDS - optional comma-separated image IDs of further such workspaces
 
 Coordinates: every click/scroll uses the coordinate space of the most recent kasm_look image for
 that session. The desktop resizes when someone opens the session in their browser, so clicks are
@@ -386,10 +387,11 @@ def _resolve_session(args: dict) -> str:
 def _status_file(kid: str) -> str | None:
     """Where this session's readiness is published, or None when no status file applies to it."""
     directory = os.environ.get("KASM_SESSION_STATUS_DIR")
-    workspace = _kid(os.environ.get("KASM_PILOT_WORKSPACE_ID", ""))
+    listed = f"{os.environ.get('KASM_PILOT_WORKSPACE_ID', '')},{os.environ.get('KASM_STATUS_WORKSPACE_IDS', '')}"
+    workspaces = {_kid(item.strip()) for item in listed.split(",") if item.strip()}
     creds = _SESSIONS.get(kid) or {}
-    if (not directory or not workspace or not re.fullmatch(r"[a-f0-9]{32}", kid)
-            or not (creds.get("pilot") or _kid(creds.get("image_id") or "") == workspace)):
+    if (not directory or not workspaces or not re.fullmatch(r"[a-f0-9]{32}", kid)
+            or not (creds.get("pilot") or _kid(creds.get("image_id") or "") in workspaces)):
         return None
     return os.path.join(directory, f"{kid}.json")
 
@@ -409,14 +411,14 @@ def _session_state(kid: str) -> dict:
                 and isinstance(detail, str) and typing in ("ascii", "unicode")
                 and isinstance(updated, (int, float)) and not isinstance(updated, bool) and math.isfinite(updated)):
             if state in ("queued", "preparing") and time.time() - updated > STATUS_STALE_SECONDS:
-                return {"state": "failed", "detail": "The Windows controller stopped reporting this session.",
+                return {"state": "failed", "detail": "The desktop's controller stopped reporting this session.",
                         "typing": typing}
             return {"state": state, "detail": detail, "typing": typing}
     except (OSError, ValueError, KeyError, TypeError):
         pass  # unreadable or malformed counts as missing
     if time.time() - creds.get("started", 0) < STATUS_GRACE_SECONDS:
         return {"state": "preparing", "detail": "", "typing": "ascii"}
-    return {"state": "failed", "detail": "The Windows controller did not report this session.", "typing": "ascii"}
+    return {"state": "failed", "detail": "The desktop's controller did not report this session.", "typing": "ascii"}
 
 
 def _ready_session(args: dict) -> str:

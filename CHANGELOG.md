@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.5 — 2026-11-27
+
+- **Status files for more than one workspace.** `KASM_STATUS_WORKSPACE_IDS` lists the image IDs of
+  further workspaces whose desktops an outside controller prepares; their sessions are gated on
+  `<session_id>.json` like the one named by `KASM_PILOT_WORKSPACE_ID`. Added for a macOS workspace
+  served next to the Windows one. The two "controller" failure messages no longer say Windows.
+
 ## 0.5.4 — 2026-11-27
 
 Found by driving macOS Sequoia 15 (a QEMU guest) through a Server (VNC) workspace and through a

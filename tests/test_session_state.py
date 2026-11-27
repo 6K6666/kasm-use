@@ -8,7 +8,7 @@ from kasm_use import server, tools
 SID = "a" * 32
 IMAGE = "b" * 32
 STARTED = 1000.0
-MISSING = "The Windows controller did not report this session."
+MISSING = "The desktop's controller did not report this session."
 
 
 class FakeVNC:
@@ -71,6 +71,19 @@ def test_another_workspace_ignores_the_status_directory(tmp_path):
     assert tools._session_state(SID)["state"] == "preparing"
     tools._VISIBLE.add(SID)
     assert tools._session_state(SID) == {"state": "ready", "detail": "", "typing": "unicode"}
+
+
+@pytest.mark.parametrize("listed", ["c" * 32, f"{'d' * 32}, {'c' * 8}-{'c' * 4}-{'c' * 4}-{'c' * 4}-{'c' * 12} "])
+def test_further_workspaces_can_be_listed_for_status_files(monkeypatch, tmp_path, listed):
+    """A second controller (macOS beside Windows) prepares another workspace's desktops and
+    writes into the same directory."""
+    monkeypatch.setenv("KASM_STATUS_WORKSPACE_IDS", listed)
+    tools._SESSIONS[SID]["image_id"] = "c" * 32
+    publish(tmp_path, "preparing", "macOS is starting")
+    assert tools._session_state(SID) == {"state": "preparing", "detail": "macOS is starting", "typing": "ascii"}
+    assert "still preparing" in json.loads(tools.kasm_look({"session_id": SID}))["error"]
+    tools._SESSIONS[SID]["image_id"] = "e" * 32  # a workspace nobody listed stays a plain desktop
+    assert tools._session_state(SID)["state"] == "preparing" and tools._status_file(SID) is None
 
 
 def test_a_session_recorded_without_its_workspace_id_ignores_the_status_directory(tmp_path):
@@ -348,7 +361,7 @@ def test_a_status_file_that_stopped_being_updated_is_a_failure(monkeypatch, tmp_
     assert tools._session_state(SID)["state"] == phase
     monkeypatch.setattr(tools.time, "time", lambda: STARTED + tools.STATUS_STALE_SECONDS + 1)
     state = tools._session_state(SID)
-    assert (state["state"], state["detail"]) == ("failed", "The Windows controller stopped reporting this session.")
+    assert (state["state"], state["detail"]) == ("failed", "The desktop's controller stopped reporting this session.")
     assert "stopped reporting" in json.loads(tools.kasm_look({"session_id": SID}))["error"]
 
 
