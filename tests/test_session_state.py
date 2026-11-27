@@ -411,3 +411,21 @@ def test_wait_forgives_a_desktop_that_refuses_connections_at_first(monkeypatch):
 
     monkeypatch.setattr(tools, "_session", connect)
     assert json.loads(tools.kasm_wait({"session_id": SID}))["state"] == "ready"
+
+
+# --------------------------------------------------------------------- press_enter after typing
+def test_press_enter_waits_a_moment_after_the_text_as_a_person_does(monkeypatch):
+    """XFCE's application finder on a 1024x768 desktop, 2026-11-27: Enter sent 30 ms after the last
+    character was ignored three times out of three; the same Enter a second later launched the
+    program. The finder handles the typed text a moment after it arrives."""
+    monkeypatch.delenv("KASM_SESSION_STATUS_DIR")
+    desktop = FakeVNC()
+    monkeypatch.setattr(tools, "_session", lambda kid: desktop)
+    monkeypatch.setattr(tools.time, "sleep", lambda seconds: desktop.actions.append(("sleep", seconds)))
+    result = json.loads(tools.kasm_type({"session_id": SID, "text": "xfce4-terminal", "press_enter": True}))
+    assert result["pressed_enter"] is True
+    assert desktop.actions == [("type", ("xfce4-terminal",)), ("sleep", tools.ENTER_PAUSE_SECONDS),
+                               ("combo", ([0xFF0D],))]
+    desktop.actions.clear()
+    tools.kasm_type({"session_id": SID, "text": "no enter"})
+    assert desktop.actions == [("type", ("no enter",))]  # nothing to wait for

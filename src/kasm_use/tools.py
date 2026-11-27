@@ -890,6 +890,11 @@ def kasm_drag(args, **kw):
         return _err(str(e))
 
 
+# An application that handles typed text a moment after it arrives ignores an Enter that follows
+# the last character at once (XFCE's application finder, measured 2026-11-27).
+ENTER_PAUSE_SECONDS = 0.5
+
+
 def kasm_type(args, **kw):
     text = args.get("text", "")
     if not text:
@@ -904,6 +909,7 @@ def kasm_type(args, **kw):
         with _session(kid) as s:
             s.type(text)
             if args.get("press_enter"):
+                time.sleep(ENTER_PAUSE_SECONDS)
                 s.combo([vnc.keysym("Return")])
         return _verify_after(
             kid,

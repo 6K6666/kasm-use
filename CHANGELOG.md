@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.6 — 2026-11-27
+
+- **`press_enter` waits half a second after the text.** XFCE's application finder on a 1024x768
+  desktop ignored an Enter sent 30 ms after the last character (3 of 3 tries), so `kasm_type` with
+  `press_enter` typed a program's name and nothing started. With a pause of 0.15 s or 0.5 s it
+  started every time (3 of 3 each); a 1280x800 desktop did not show the problem. Found by ChatGPT
+  driving Ubuntu Noble.
+
 ## 0.5.5 — 2026-11-27
 
 - **Status files for more than one workspace.** `KASM_STATUS_WORKSPACE_IDS` lists the image IDs of
