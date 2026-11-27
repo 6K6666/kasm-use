@@ -91,6 +91,7 @@ KEEPALIVE_SECONDS = 300
 _KEPT: dict[str, float] = {}
 _KEEPALIVE_WARNED: set[str] = set()
 STATUS_GRACE_SECONDS = 60  # how long a status-file session may go unreported before it has failed
+STATUS_APPEAR_SECONDS = 10  # how long kasm_start waits for a status-file session's first report
 STATUS_STALE_SECONDS = 900  # a queued or preparing status nobody has rewritten for this long is a dead controller
 
 
@@ -789,8 +790,17 @@ def kasm_start(args, **kw):
                 return _ok(**waiting, note="Kasm is still starting this session. Call kasm_wait.")
             time.sleep(5)
         _apply_screen(kid, deadline)
+        detail = {}
         if _status_file(kid):  # whatever prepares this desktop says when it is ready; the viewer's own screen does not
-            state = _session_state(kid)["state"]
+            # Its first report comes on its next pass, seconds after Kasm says "running"; until then a
+            # queued session would read as preparing. Counted, not timed: a slow file system must not
+            # stretch it.
+            for _ in range(STATUS_APPEAR_SECONDS * 2):
+                if os.path.exists(_status_file(kid)) or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.5)
+            status = _session_state(kid)
+            state, detail = status["state"], {"detail": status["detail"]}
         elif transport == "guac":
             # shortcut: a Guacamole desktop is reported ready unseen; probing it would open a browser here.
             state = "ready"
@@ -799,7 +809,9 @@ def kasm_start(args, **kw):
             state = "ready" if left > 0 and _wait_visible(kid, left) else "preparing"
         ready = state == "ready"
         return _ok(session_id=kid, workspace=img.get("friendly_name"), image=img.get("name"), state=state, ready=ready,
+                   **detail,
                    note="Desktop is visible. Call kasm_look next." if ready
+                   else "Queued behind another session. Call kasm_wait; it starts when a slot frees." if state == "queued"
                    else "Desktop is still starting. Call kasm_wait.")
     except Exception as e:
         return _err(str(e))
@@ -993,7 +1005,19 @@ def kasm_scroll(args, **kw):
 def kasm_stop(args, **kw):
     try:
         kid = _resolve_session(args)
-        _call("destroy_kasm", kasm_id=kid, user_id=_user())
+        note = {}
+        try:
+            _call("destroy_kasm", kasm_id=kid, user_id=_user())
+        except RuntimeError:
+            # Whatever prepares a desktop may end the Kasm session of a launch that failed. Kasm then
+            # refuses the ID; only its own list can say the session is gone and not merely unreachable.
+            try:
+                listed = {_kid(k.get("kasm_id", "")) for k in _call("get_kasms").get("kasms", [])}
+            except Exception:
+                listed = {kid}
+            if kid in listed:
+                raise
+            note = {"note": "Kasm had already ended this session."}
         with _LOCK:
             stopped = _SESSIONS.pop(kid, {})
             _LAST_SHOT.pop(kid, None)
@@ -1002,7 +1026,7 @@ def kasm_stop(args, **kw):
         _save_sessions()
         if stopped.get("transport") == "guac":
             guac.close(kid)
-        return _ok(session_id=kid, stopped=True)
+        return _ok(session_id=kid, stopped=True, **note)
     except Exception as e:
         return _err(str(e))
 

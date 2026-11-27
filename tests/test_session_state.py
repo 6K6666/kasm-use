@@ -270,6 +270,61 @@ def test_stop_works_in_every_state(monkeypatch, tmp_path, phase):
     assert calls == [("destroy_kasm", {"kasm_id": SID, "user_id": "owner"})]
 
 
+GONE = "Kasm destroy_kasm HTTP 400: b'{\"error_message\": \"Invalid kasm_id\"}'"
+
+
+def refuse_destroy(listed):
+    def call(endpoint, **_):
+        if endpoint == "destroy_kasm":
+            raise RuntimeError(GONE)
+        if listed is None:
+            raise RuntimeError("Kasm get_kasms HTTP 502: b''")
+        return {"kasms": [{"kasm_id": kid} for kid in listed]}
+    return call
+
+
+def test_stop_of_a_session_kasm_already_ended_succeeds_and_forgets_it(monkeypatch):
+    """Seen 2026-11-27: the controller ends the Kasm session of a failed launch, and kasm_stop then
+    answered with Kasm's HTTP 400 although the session was gone, as the agent wanted."""
+    monkeypatch.setattr(tools, "_call", refuse_destroy([]))
+    assert json.loads(tools.kasm_stop({"session_id": SID})) == {
+        "ok": True, "session_id": SID, "stopped": True, "note": "Kasm had already ended this session."}
+    assert SID not in tools._SESSIONS
+
+
+@pytest.mark.parametrize("listed", [[SID], None])
+def test_stop_keeps_a_session_it_could_not_confirm_gone(monkeypatch, listed):
+    monkeypatch.setattr(tools, "_call", refuse_destroy(listed))
+    result = json.loads(tools.kasm_stop({"session_id": SID}))
+    assert (result["ok"], result["error"]) == (False, GONE)
+    assert SID in tools._SESSIONS
+
+
+def test_start_waits_for_the_controllers_first_report_and_says_queued(monkeypatch, tmp_path):
+    """Seen 2026-11-27: a queued session was reported "preparing" because kasm_start answered before
+    the controller's next pass had written its status file."""
+    kid, detail = "f" * 32, "Another macOS session is using the last slot. Yours starts when one ends."
+    replies = {
+        "get_images": {"images": [{"enabled": True, "friendly_name": "Windows", "name": "w:1", "image_id": IMAGE}]},
+        "request_kasm": {"kasm_id": kid, "username": "alice", "session_token": "t"},
+        "get_kasm_status": {"kasm": {"operational_status": "running"}},
+    }
+    monkeypatch.setattr(tools, "_call", lambda endpoint, **_: replies[endpoint])
+    sleeps = []
+
+    def controller_reports_on_its_next_pass(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            (tmp_path / f"{kid}.json").write_text(json.dumps(
+                {"session_id": kid, "phase": "queued", "detail": detail, "typing": "ascii", "updated": STARTED}))
+
+    monkeypatch.setattr(tools.time, "sleep", controller_reports_on_its_next_pass)
+    result = json.loads(tools.kasm_start({"workspace": "Windows"}))
+    assert (result["state"], result["ready"], result["detail"]) == ("queued", False, detail)
+    assert result["note"] == "Queued behind another session. Call kasm_wait; it starts when a slot frees."
+    assert sleeps == [0.5, 0.5, 0.5]
+
+
 def test_start_reports_the_state_of_a_status_file_session_without_probing_it(monkeypatch):
     replies = {
         "get_images": {"images": [{"enabled": True, "friendly_name": "Windows", "name": "w:1", "image_id": IMAGE}]},
