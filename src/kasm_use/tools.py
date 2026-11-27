@@ -594,7 +594,7 @@ def _shot(kid: str) -> tuple[bytes, tuple[int, int], bool]:
 # middle of an animation (measured 2026-11-27). verify_after looks until two looks agree.
 VERIFY_POLL_SECONDS = 0.5
 VERIFY_MIN_SAMPLES = 2
-VERIFY_MAX_SAMPLES = 8
+VERIFY_MAX_SECONDS = 4.0
 
 
 def _settled_shot(kid: str) -> tuple[bytes, tuple[int, int], bool, bool, float]:
@@ -603,19 +603,22 @@ def _settled_shot(kid: str) -> tuple[bytes, tuple[int, int], bool, bool, float]:
     Sampled on one connection. A sample equal to either of the two before it means nothing is moving;
     comparing with two lets a blinking cursor, which alternates between two pictures, count as still.
     """
+    began = time.monotonic()
     seen: list[bytes] = []
     with _session(kid) as s:
         while True:
-            time.sleep(VERIFY_POLL_SECONDS)
+            # One look per interval, counting what the look itself takes: half a second for a
+            # 1280x800 desktop, which a fixed sleep would add to every interval.
+            time.sleep(max(0.0, began + (len(seen) + 1) * VERIFY_POLL_SECONDS - time.monotonic()))
             png = s.screenshot()
             settled = len(seen) + 1 >= VERIFY_MIN_SAMPLES and png in seen[-2:]
             seen.append(png)
-            if settled or len(seen) >= VERIFY_MAX_SAMPLES:
+            if settled or time.monotonic() - began >= VERIFY_MAX_SECONDS:
                 break
         size, blank = (s.width, s.height), bool(getattr(s, "blank", False))
     if not blank:
         _VISIBLE.add(kid)
-    return png, size, blank, settled, len(seen) * VERIFY_POLL_SECONDS
+    return png, size, blank, settled, round(time.monotonic() - began, 1)
 
 
 def _wait_visible(kid: str, seconds: float) -> bool:

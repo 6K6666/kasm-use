@@ -47,6 +47,14 @@ class FakeVNC:
         return self.frames.pop(0) if self.frames else PNG
 
 
+class Clock:
+    """Time that passes only when the code under test sleeps, or a fake screenshot says it took a while."""
+    now = 0.0
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
 @pytest.fixture(autouse=True)
 def clean_session(monkeypatch):
     monkeypatch.delenv("KASM_SESSION_STATE_FILE", raising=False)
@@ -58,8 +66,10 @@ def clean_session(monkeypatch):
     FakeVNC.frames.clear()
     tools._SESSIONS[SID] = {"started": 1, "workspace": "Chrome"}
     tools._LAST_SHOT[SID] = (800, 600)
-    monkeypatch.setattr(tools.time, "sleep", lambda *_: None)
-    yield
+    clock = Clock()
+    monkeypatch.setattr(tools.time, "sleep", clock.sleep)
+    monkeypatch.setattr(tools.time, "monotonic", lambda: clock.now)
+    yield clock
     tools._SESSIONS.clear()
     tools._LAST_SHOT.clear()
     tools._STATE_LOADED = False
@@ -180,3 +190,16 @@ def test_verify_after_records_the_screenshot_size_for_the_next_click(monkeypatch
     tools._LAST_SHOT[SID] = (1024, 768)  # the desktop was resized since the last look
     verified_click(monkeypatch, [])
     assert tools._LAST_SHOT[SID] == (800, 600)
+
+
+@pytest.mark.parametrize(("frames", "ends_at"), [
+    ([b"A", b"A"], 1.5),                           # looks at 0.5 and 1.0, the second done at 1.5
+    ([bytes([n]) for n in range(20)], 4.0),         # never still: the last look is the one done at 4.0
+])
+def test_verify_after_counts_the_time_each_look_takes(monkeypatch, clean_session, frames, ends_at):
+    """Measured 2026-11-27: one look at a 1280x800 desktop takes half a second. Sleeping half a second
+    between looks on top of that doubled every wait, to 8 s for a screen that never settles."""
+    look = FakeVNC.screenshot
+    monkeypatch.setattr(FakeVNC, "screenshot", lambda self: clean_session.sleep(0.5) or look(self))
+    verify, _, _ = verified_click(monkeypatch, frames)
+    assert (clean_session.now, verify["waited_seconds"]) == (ends_at, ends_at)

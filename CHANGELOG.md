@@ -19,6 +19,7 @@ ChatGPT through this server.
   mid-animation). It is now sampled every half second until a sample equals one of the two before
   it, so a blinking cursor counts as still, for 4 s at most; the result says `settled` and
   `waited_seconds`. A program that takes seconds to open can still appear later.
+  One look at a 1280x800 desktop takes half a second, so the interval counts the look itself.
 - `server.json` carries the package version again (it said 0.4.0).
 
 ## 0.5.6 — 2026-11-27
