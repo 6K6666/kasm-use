@@ -71,9 +71,9 @@ with a throwaway local account. What was seen, and what kasm-use does about it:
 
 | Behaviour | Result |
 | --- | --- |
-| First frames after `kasm_start` | Windows sign-in screen ("Just a moment…"), then the desktop about 40 s later for a new profile |
+| First frames after `kasm_start` | Windows sign-in screen ("Just a moment…"), then the desktop |
 | First frame after each attach | Solid black; reported as blank since 0.5.3 |
-| Input within about 1 s of an attach | Dropped by Windows (6 of 6); held for 3 s since 0.5.3 (6 of 6 arrive) |
+| Input within 1 s of an attach showing the desktop | Dropped by Windows in 8 of 9 tries; with 2 s or more, 9 of 9 arrived. Held for 3 s since 0.5.3 |
 | Typing into PowerShell | ASCII punctuation and `é € 日本 ñ ü ß — “x”` byte for byte, read back from the guest |
 | Typing into Notepad in one burst | Shift and Unicode lost; exact with 20 ms between key events (0.5.3) |
 | `super+r`, `alt+f4`, `ctrl+shift+escape`, `super`, `super+up`, `alt+tab`, `ctrl+a`, `ctrl+c` | Work |
