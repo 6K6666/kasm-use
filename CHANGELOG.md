@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.7 — 2026-11-27
+
+Found by a usability stress test of Ubuntu Noble, Windows 11 and macOS Sequoia desktops, driven by
+ChatGPT through this server.
+
+- **`kasm_stop` succeeds for a session Kasm already ended.** Whatever prepares a desktop may end the
+  Kasm session of a launch that failed; `kasm_stop` then returned Kasm's HTTP 400 ("Invalid
+  kasm_id") and kept the record. It now asks Kasm's session list: a session that is no longer there
+  is reported stopped, with a note. If the list cannot be read or still shows the session, the
+  error is returned as before.
+- **`kasm_start` waits for a prepared desktop's first status.** A queued session was reported
+  `preparing`, because `kasm_start` answered before the controller's next pass had written the
+  status file. It waits up to 10 s for that file, returns its `detail`, and says so when the
+  session is queued.
+- **`verify_after` returns the screen once it has stopped changing.** The screenshot was taken the
+  instant the input was sent (seven of them showed a screen that had not reacted yet or was in
+  mid-animation). It is now sampled every half second until a sample equals one of the two before
+  it, so a blinking cursor counts as still, for 4 s at most; the result says `settled` and
+  `waited_seconds`. A program that takes seconds to open can still appear later.
+- `server.json` carries the package version again (it said 0.4.0).
+
 ## 0.5.6 — 2026-11-27
 
 - **`press_enter` waits half a second after the text.** XFCE's application finder on a 1024x768
