@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2 — 2026-11-27
+
+- **The first screenshot of a Server (Guacamole) desktop is no longer empty.** Right after the
+  browser attached, the display had its size but no frame, and `kasm_look` returned a fully
+  transparent image without saying so. The screenshot now waits up to 8 s for the first drawn
+  pixel, and `kasm_look` adds its "Screen is blank" note when none arrives. Found in the first
+  live run of this transport on 0.5.x, against an xrdp desktop.
+
 ## 0.5.1 — 2026-11-26
 
 - **`kasm_start` answers within about a minute.** It used to wait up to five minutes for Kasm to

@@ -1,5 +1,6 @@
 """Guacamole transport and Kasm session ownership regressions."""
 
+from contextlib import contextmanager
 import json
 
 import pytest
@@ -72,8 +73,10 @@ def test_user_select_windows_requests_browser_transport(monkeypatch):
     assert tools._SESSIONS[SID]["transport"] == "guac"
 
 
-def test_browser_drives_exact_guacamole_frame():
-    """Run with the guac extra and installed Chromium."""
+@contextmanager
+def kasm_page(paint):
+    """A stand-in for Kasm's Guacamole client page in real Chromium. `paint` is JavaScript that
+    draws on the 23x19 display `canvas`; without any, the display stays empty (transparent)."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from threading import Thread
 
@@ -94,6 +97,7 @@ def test_browser_drives_exact_guacamole_frame():
                 html = """<div id="display"></div><script>
                     const canvas = document.createElement("canvas");
                     canvas.width = 23; canvas.height = 19;
+                    const draw = () => { const c = canvas.getContext("2d"); c.fillStyle = "#285d8d"; c.fillRect(0, 0, 23, 19); };
                     window.events = [];
                     const Guacamole = { Mouse: { State: class {
                         constructor(...args) { this.args = args; }
@@ -112,7 +116,8 @@ def test_browser_drives_exact_guacamole_frame():
                             }
                         }
                     };
-                    </script>"""
+                    PAINT
+                    </script>""".replace("PAINT", paint)
             else:
                 self.send_error(404)
                 return
@@ -125,10 +130,40 @@ def test_browser_drives_exact_guacamole_frame():
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        url = f"http://127.0.0.1:{server.server_port}{LINK}"
+        yield f"http://127.0.0.1:{server.server_port}{LINK}"
+    finally:
+        guac.close(SID)
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def drawn_pixels(png):
+    """How many pixels of a screenshot are not transparent, counted by the browser that made it."""
+    import base64
+
+    return guac._worker.submit(lambda: guac._pages[SID][1].evaluate("""async data => {
+        const image = new Image();
+        image.src = "data:image/png;base64," + data;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width; canvas.height = image.height;
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0);
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let drawn = 0;
+        for (let i = 3; i < pixels.length; i += 4) if (pixels[i]) drawn++;
+        return drawn;
+    }""", base64.b64encode(png).decode())).result()
+
+
+def test_browser_drives_exact_guacamole_frame():
+    """Run with the guac extra and installed Chromium."""
+    with kasm_page("draw();") as url:
         with guac.Session(SID, url, PATH, True) as desktop:
             assert desktop.screenshot().startswith(b"\x89PNG\r\n\x1a\n")
             assert (desktop.width, desktop.height) == (23, 19)
+            assert desktop.blank is False
             desktop.click(2, 3, 1, 2)
             desktop.drag(2, 3, 4, 5, 3)
             desktop.scroll(3, 4, "down", 2)
@@ -143,11 +178,44 @@ def test_browser_drives_exact_guacamole_frame():
         assert events[15] == [0, 0xffe1]
         assert events[-6:] == [[1, 233], [0, 233], [1, 0xffe3],
                               [1, 0x61], [0, 0x61], [0, 0xffe3]]
-    finally:
-        guac.close(SID)
-        server.shutdown()
-        server.server_close()
-        thread.join()
+
+
+def test_screenshot_waits_for_the_first_frame_after_attaching():
+    """Seen live on 2026-11-27: right after the browser attaches, Guacamole's display has its size
+    but nothing drawn, and the screenshot was a fully transparent image."""
+    with kasm_page("setTimeout(draw, 700);") as url:
+        with guac.Session(SID, url, PATH, True) as desktop:
+            png = desktop.screenshot()
+            assert drawn_pixels(png) == 23 * 19
+            assert desktop.blank is False
+
+
+def test_screenshot_says_blank_when_no_frame_ever_arrives(monkeypatch):
+    monkeypatch.setattr(guac, "FIRST_FRAME_SECONDS", 1)
+    with kasm_page("") as url:
+        with guac.Session(SID, url, PATH, True) as desktop:
+            png = desktop.screenshot()  # still returns what there is, after the wait
+            assert png.startswith(b"\x89PNG\r\n\x1a\n")
+            assert desktop.blank is True
+
+
+def test_look_says_when_a_guacamole_desktop_has_drawn_nothing(monkeypatch):
+    class Empty:
+        width, height, blank = 1280, 800, True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def screenshot(self):
+            return b"\x89PNG\r\n\x1a\nempty"
+
+    tools._SESSIONS[SID] = {"transport": "guac", "username": "alice", "workspace": "Windows", "started": 1}
+    monkeypatch.setattr(tools, "_session", lambda kid: Empty())
+    monkeypatch.setattr(tools.time, "sleep", lambda *_: None)
+    assert "Screen is blank" in tools.kasm_look({"session_id": SID})["content"][0]["text"]
 
 
 def test_browser_transport_restores_without_link_or_token(monkeypatch, tmp_path):

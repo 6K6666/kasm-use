@@ -21,6 +21,22 @@ _READY = """() => typeof app !== 'undefined' && app.isConnected() &&
 """
 
 
+# Right after the browser attaches, the display has its size but no frame yet: flattening it gives a
+# fully transparent image. Wait for the first drawn pixel; a display that has one answers at once.
+FIRST_FRAME_SECONDS = 8
+_FRAME = """async limit => {
+    const display = app.guac.getDisplay(), deadline = Date.now() + limit;
+    for (;;) {
+        const canvas = display.flatten();
+        const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+        let drawn = false;
+        for (let i = 3; i < pixels.length && !drawn; i += 4) drawn = pixels[i] !== 0;
+        if (drawn || Date.now() >= deadline) return [drawn, canvas.toDataURL('image/png').split(',')[1]];
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+}"""
+
+
 def _origin(url):
     parsed = urlsplit(url)
     return parsed.scheme, parsed.netloc
@@ -128,9 +144,8 @@ class Session:
             raise ConnectionError("Kasm Guacamole desktop is disconnected or awaiting RDP login.") from None
 
     def screenshot(self):
-        data = self._eval(
-            "() => app.guac.getDisplay().flatten().toDataURL('image/png').split(',')[1]"
-        )
+        drawn, data = self._eval(_FRAME, FIRST_FRAME_SECONDS * 1000)
+        self.blank = not drawn  # kasm_look says so, as for a VNC desktop that has drawn nothing
         png = base64.b64decode(data)
         self.width, self.height = struct.unpack(">II", png[16:24])
         return png
