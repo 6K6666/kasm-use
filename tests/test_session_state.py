@@ -509,3 +509,61 @@ def test_press_enter_waits_a_moment_after_the_text_as_a_person_does(monkeypatch)
     desktop.actions.clear()
     tools.kasm_type({"session_id": SID, "text": "no enter"})
     assert desktop.actions == [("type", ("no enter",))]  # nothing to wait for
+
+
+# ------------------------------------------------- found by the second stress test, 2026-11-27
+OTHER = "e" * 32
+
+
+def test_a_call_that_names_no_session_is_refused_when_this_client_has_several(monkeypatch):
+    """Seen 2026-11-27: with Ubuntu ready and Windows preparing, a look and a key press that named
+    no session both went to Windows, the later one. A wrong desktop is worse than an extra argument."""
+    tools._SESSIONS[OTHER] = {"started": STARTED + 5, "workspace": "Ubuntu Noble", "username": "u"}
+    monkeypatch.setattr(tools, "_MINE", {SID, OTHER})
+    result = json.loads(tools.kasm_key({"keys": "shift"}))
+    assert result == {"ok": False, "error": "You have 2 sessions, so say which one. Pass session_id: "
+                                            f"{SID} (Windows), {OTHER} (Ubuntu Noble)."}
+    assert json.loads(tools.kasm_key({"keys": "shift", "session_id": OTHER}))["ok"] is True
+
+
+def test_a_single_session_of_this_client_needs_no_session_id(monkeypatch):
+    tools._SESSIONS[OTHER] = {"started": STARTED + 5, "workspace": "Ubuntu Noble", "username": "u"}
+    monkeypatch.setattr(tools, "_MINE", {OTHER})  # the other tracked session belongs to another client process
+    assert json.loads(tools.kasm_key({"keys": "shift"}))["session_id"] == OTHER
+
+
+def publish_limits(tmp_path, unsupported):
+    (tmp_path / f"{SID}.json").write_text(json.dumps(
+        {"session_id": SID, "phase": "ready", "detail": "", "typing": "ascii", "updated": STARTED,
+         "unsupported": unsupported}))
+
+
+NO_CLIPBOARD = "This desktop has no clipboard link, so nothing can be pasted into it. Use kasm_type."
+NO_WHEEL = "This desktop ignores the mouse wheel. Press page_up or page_down with kasm_key."
+
+
+def test_a_desktop_says_what_it_cannot_do_and_the_tool_refuses_with_its_words(monkeypatch, tmp_path):
+    """Seen 2026-11-27: kasm_paste and kasm_scroll answered ok on a macOS desktop that has no
+    clipboard link and ignores the wheel, and nothing happened."""
+    publish_limits(tmp_path, {"kasm_paste": NO_CLIPBOARD, "kasm_scroll": NO_WHEEL})
+    sessions = typed(monkeypatch)
+    assert json.loads(tools.kasm_paste({"text": "é"})) == {"ok": False, "error": NO_CLIPBOARD}
+    assert json.loads(tools.kasm_scroll({"direction": "up"})) == {"ok": False, "error": NO_WHEEL}
+    assert sessions == []  # neither opened a connection, so nothing was sent
+    assert json.loads(tools.kasm_key({"keys": "page_up"}))["ok"] is True
+
+
+@pytest.mark.parametrize("unsupported", [None, "kasm_paste", ["kasm_paste"], {"kasm_paste": 5}, {"kasm_paste": "x" * 301},
+                                         {"rm -rf": "no"}, {f"kasm_{n}": "no" for n in "abcdefghijklmnopq"}])
+def test_a_malformed_list_of_limits_is_ignored_and_the_status_still_counts(monkeypatch, tmp_path, unsupported):
+    publish_limits(tmp_path, unsupported)
+    typed(monkeypatch)
+    assert tools._session_state(SID)["state"] == "ready"
+    assert json.loads(tools.kasm_scroll({"direction": "up"}))["ok"] is True
+
+
+def test_a_session_that_ended_after_it_was_ready_is_not_said_to_have_failed_to_start(tmp_path):
+    publish(tmp_path, "failed", "macOS stopped or its viewer disconnected before the Kasm session ended")
+    error = json.loads(tools.kasm_look({"wait_seconds": 0}))["error"]
+    assert error == (f"Session {SID[:8]} is not usable: macOS stopped or its viewer disconnected before the "
+                     "Kasm session ended. Call kasm_stop, then start a new one.")

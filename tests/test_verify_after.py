@@ -104,7 +104,7 @@ def test_verify_after_reopens_same_session_and_returns_screenshot(monkeypatch, t
     action = json.loads(result["content"][0]["text"])
     assert action["ok"] is True
     assert action["verify_after"] == {"status": "screenshot_returned", "input_sent": True,
-                                      "settled": True, "waited_seconds": 1.0}
+                                      "settled": True, "waited_seconds": 1.0, "screen": [800, 600]}
     image = next(part for part in result["content"] if part["type"] == "image_url")
     encoded = image["image_url"]["url"].split(",", 1)[1]
     assert base64.b64decode(encoded) == PNG
@@ -175,7 +175,7 @@ def test_verify_after_returns_the_screen_once_it_stops_changing(monkeypatch, fra
     verify, image, taken = verified_click(monkeypatch, frames)
     assert (taken, image) == (samples, shown)
     assert verify == {"status": "screenshot_returned", "input_sent": True,
-                      "settled": True, "waited_seconds": samples * 0.5}
+                      "settled": True, "waited_seconds": samples * 0.5, "screen": [800, 600]}
 
 
 def test_verify_after_gives_up_on_a_screen_that_never_settles(monkeypatch):
@@ -203,3 +203,10 @@ def test_verify_after_counts_the_time_each_look_takes(monkeypatch, clean_session
     monkeypatch.setattr(FakeVNC, "screenshot", lambda self: clean_session.sleep(0.5) or look(self))
     verify, _, _ = verified_click(monkeypatch, frames)
     assert (clean_session.now, verify["waited_seconds"]) == (ends_at, ends_at)
+
+
+def test_verify_after_says_how_big_the_screen_is_now(monkeypatch):
+    """Seen 2026-11-27: the owner opened a session in a browser, Kasm resized the desktop to that
+    window, and an agent working with verify_after had no way to notice without a separate look."""
+    verify, _, _ = verified_click(monkeypatch, [])
+    assert verify["screen"] == [800, 600]

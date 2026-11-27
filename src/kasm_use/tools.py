@@ -357,7 +357,7 @@ def _verify_after(kid: str, result: str, enabled: bool):
         return json.dumps(action)
 
     action["verify_after"] = {"status": "screenshot_returned", "input_sent": True,
-                              "settled": settled, "waited_seconds": waited}
+                              "settled": settled, "waited_seconds": waited, "screen": list(size)}
     if not settled:
         action["verify_after"]["instruction"] = "The screen was still changing. Call kasm_look to see the final state."
     text = json.dumps(action)
@@ -374,6 +374,7 @@ def _resolve_session(args: dict) -> str:
     _load_sessions()
     with _LOCK:
         tracked = {kid: creds["started"] for kid, creds in _SESSIONS.items()}
+        names = {kid: creds.get("workspace") for kid, creds in _SESSIONS.items()}
     requested = _kid(args.get("session_id") or "")
     if requested:
         if requested not in tracked:
@@ -384,9 +385,13 @@ def _resolve_session(args: dict) -> str:
         return requested
     if not tracked:
         raise RuntimeError("No session started yet. Start one with kasm_start first.")
-    mine = [kid for kid in tracked if kid in _MINE]
+    mine = sorted((kid for kid in tracked if kid in _MINE), key=tracked.get)
+    if len(mine) > 1:
+        # The latest one used to be assumed, and an input meant for one desktop went to another.
+        raise RuntimeError(f"You have {len(mine)} sessions, so say which one. Pass session_id: "
+                           + ", ".join(f"{kid} ({names[kid]})" for kid in mine) + ".")
     if mine:
-        return max(mine, key=tracked.get)
+        return mine[0]
     if len(tracked) == 1:  # after a client restart there is nothing else the call could mean
         return next(iter(tracked))
     raise RuntimeError("Several sessions are tracked and this client started none of them. "
@@ -405,8 +410,25 @@ def _status_file(kid: str) -> str | None:
     return os.path.join(directory, f"{kid}.json")
 
 
+def _unsupported(status: dict) -> dict:
+    """What a prepared desktop says it cannot do: tool name -> the sentence to answer with. Whatever
+    prepares the desktop knows; kasm-use only passes it on. Anything malformed is ignored whole."""
+    listed = status.get("unsupported")
+    if (isinstance(listed, dict) and len(listed) <= 12
+            and all(isinstance(tool, str) and re.fullmatch(r"kasm_[a-z_]{1,30}", tool)
+                    and isinstance(why, str) and 0 < len(why) <= 300 for tool, why in listed.items())):
+        return listed
+    return {}
+
+
+def _refuse_unsupported(kid: str, tool: str) -> None:
+    why = _session_state(kid).get("unsupported", {}).get(tool) if _status_file(kid) else None
+    if why:
+        raise RuntimeError(why)
+
+
 def _session_state(kid: str) -> dict:
-    """{"state": queued|preparing|ready|failed, "detail": str, "typing": ascii|unicode}."""
+    """{"state": queued|preparing|ready|failed, "detail": str, "typing": ascii|unicode, "unsupported"?: dict}."""
     creds = _SESSIONS.get(kid) or {}
     path = _status_file(kid)
     if path is None:
@@ -422,7 +444,8 @@ def _session_state(kid: str) -> dict:
             if state in ("queued", "preparing") and time.time() - updated > STATUS_STALE_SECONDS:
                 return {"state": "failed", "detail": "The desktop's controller stopped reporting this session.",
                         "typing": typing}
-            return {"state": state, "detail": detail, "typing": typing}
+            limits = _unsupported(status)
+            return {"state": state, "detail": detail, "typing": typing, **({"unsupported": limits} if limits else {})}
     except (OSError, ValueError, KeyError, TypeError):
         pass  # unreadable or malformed counts as missing
     if time.time() - creds.get("started", 0) < STATUS_GRACE_SECONDS:
@@ -444,7 +467,7 @@ def _ready_session(args: dict) -> str:
             raise RuntimeError(f"Session {kid[:8]} is still preparing (state {status['state']}{detail}). "
                                "Call kasm_wait until its state is ready.")
         if status["state"] == "failed":
-            raise RuntimeError(f"Session {kid[:8]} failed to start{detail}. Call kasm_stop, then start a new one.")
+            raise RuntimeError(f"Session {kid[:8]} is not usable{detail}. Call kasm_stop, then start a new one.")
     return kid
 
 
@@ -1047,6 +1070,7 @@ def kasm_paste(args, **kw):
     try:
         combo = [vnc.keysym(part) for part in shortcut.split("+") if part]
         kid = _ready_session(args)
+        _refuse_unsupported(kid, "kasm_paste")
         with _session(kid) as s:
             if not hasattr(s, "set_clipboard"):
                 return _err("This workspace's connection has no clipboard. Use kasm_type.")
@@ -1087,6 +1111,7 @@ def kasm_scroll(args, **kw):
         direction = args.get("direction", "down")
         if direction not in ("up", "down", "left", "right"):
             return _err("direction must be up, down, left or right")
+        _refuse_unsupported(kid, "kasm_scroll")
         with _session(kid) as s:
             if "x" in args and "y" in args:
                 x, y = _to_desktop(kid, args["x"], args["y"], s.width, s.height)
@@ -1142,9 +1167,11 @@ def kasm_stop(args, **kw):
 
 # ------------------------------------------------------------------------------ schemas
 _SID = {"session_id": {"type": "string",
-                       "description": "A session started by kasm_start. Omit to use the most recent one."}}
+                       "description": "A session you started or attached to. May be omitted only while you "
+                                      "have a single session."}}
 
-_VERIFY = "Return a screenshot with the result, taken once the screen has stopped changing (up to 4 s)."
+_VERIFY = ("Return a screenshot with the result, taken once the screen has stopped changing (up to 4 s), and "
+           "the screen's size. A still screen is not a finished command: check the picture for the result.")
 
 _TOOLS = [
     ("kasm_list", kasm_list,
@@ -1180,7 +1207,8 @@ _TOOLS = [
      "or failed, with a detail line. Some desktops take minutes to prepare; while the state is preparing or "
      "queued, call kasm_wait again. Each call returns within timeout_seconds.",
      {"type": "object", "properties": {
-         **_SID, "timeout_seconds": {"type": "number", "description": "How long to wait, 5-90 (default 60)."}}}),
+         **_SID, "timeout_seconds": {"type": "number", "description": "How long to wait (default 60). Values outside 5-90 "
+                                                             "are brought into that range."}}}),
     ("kasm_look", kasm_look,
      "Live screenshot of your Kasm session. Look before clicking. After an action, use verify_after=true "
      "to return a screenshot with the action, or call kasm_look to inspect the result. A program that "
@@ -1211,7 +1239,8 @@ _TOOLS = [
      "session's clipboard, then presses the paste shortcut. Terminals usually need shortcut \"ctrl+shift+v\". "
      "It replaces whatever was on the session's clipboard. If the session does not allow clipboard-in "
      "(Kasm's Allow Clipboard Up), the shortcut pastes the desktop's old clipboard instead, so check the "
-     "result. A macOS desktop has no clipboard link: use kasm_type there. NEVER paste passwords, "
+     "result. A terminal may ask you to confirm a paste of several lines. A desktop with no clipboard "
+     "link (a macOS guest, for one) refuses and tells you to use kasm_type. NEVER paste passwords, "
      "MFA codes, or payment details — stop and ask the owner to take over the session for those.",
      {"type": "object", "required": ["text"], "properties": {
          **_SID, "text": {"type": "string"},
@@ -1226,8 +1255,8 @@ _TOOLS = [
          **_SID, "keys": {"type": "string"},
          "verify_after": {"type": "boolean", "description": _VERIFY}}}),
     ("kasm_scroll", kasm_scroll,
-     "Scroll the Kasm session, optionally at x,y from the latest kasm_look image. A macOS desktop ignores "
-     "the wheel; press page_up or page_down with kasm_key there.",
+     "Scroll the Kasm session, optionally at x,y from the latest kasm_look image. A desktop that ignores "
+     "the wheel (a macOS guest, for one) refuses and tells you which keys to press instead.",
      {"type": "object", "properties": {
          **_SID, "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
          "amount": {"type": "integer", "description": "Wheel clicks, 1-30 (default 5)"},

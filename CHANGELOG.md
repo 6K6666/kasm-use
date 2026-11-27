@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.9 — 2026-11-27
+
+From ChatGPT's second stress test of the three desktops.
+
+- **With several sessions of your own, say which.** A call without `session_id` went to the session
+  started last; with Ubuntu ready and Windows preparing, a look and a key press meant for Ubuntu
+  went to Windows. Such a call is now refused with the IDs and workspaces to choose from. A client
+  with one session is unaffected.
+- **A desktop can say what it cannot do.** `kasm_paste` and `kasm_scroll` answered `ok` on a macOS
+  guest, which has no clipboard link and ignores the wheel, and nothing happened. The status file
+  may carry `unsupported` (tool name to sentence); the tool then refuses with that sentence and
+  sends nothing.
+- **`verify_after` returns the screen's size** (`screen`), so an agent notices when the desktop was
+  resized, for example because the owner opened the session in a browser.
+- A session whose status is `failed` is "not usable", no longer "failed to start": the guest may
+  have run for an hour before it stopped.
+- Descriptions: `kasm_wait` says that a timeout outside 5 to 90 is brought into range;
+  `verify_after` says that a still screen is not a finished command; `kasm_paste` mentions a
+  terminal's multi-line paste confirmation.
+
 ## 0.5.8 — 2026-11-27
 
 - **`kasm_attach`: take over a session the owner launched from the dashboard.** The owner starts a

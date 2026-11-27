@@ -52,7 +52,7 @@ MCP client are the most useful details.
 
 | Tool | What it does |
 | --- | --- |
-| `kasm_list` | Workspaces you can start, and your running sessions |
+| `kasm_list` | Workspaces you can start, and your running sessions. With more than one session of your own, every other tool needs `session_id` |
 | `kasm_attach` | Take over a running session the owner launched from the Kasm dashboard under the instance's own user (off unless `KASM_ATTACH=true`; see [Security model](#security-model)) |
 | `kasm_start` | Start a workspace; returns its `state`, and `ready: true` once the desktop has drawn |
 | `kasm_wait` | Wait until a session is ready; returns its state (`ready`, `preparing`, `queued`, `failed`) |
@@ -287,6 +287,18 @@ returns the controller's `detail`. A file that is missing, unreadable or malform
 `preparing` for the first 60 s of the session and as `failed` after that, so a controller that is
 down does not leave an agent waiting forever. `kasm_stop` works in every state. Sessions of every
 other workspace ignore the directory.
+
+The file may also say what the desktop cannot do, as an optional `unsupported` object that maps a
+tool name to the sentence to answer with:
+
+```json
+{"unsupported": {"kasm_paste": "This desktop has no clipboard link. Use kasm_type.",
+                 "kasm_scroll": "This desktop ignores the mouse wheel. Press page_up or page_down with kasm_key."}}
+```
+
+`kasm_paste` and `kasm_scroll` then refuse with that sentence and send nothing, where they used to
+answer `ok` for an input the desktop dropped. Up to 12 entries, names like `kasm_paste`, sentences
+of 300 characters at most; a malformed object is ignored and the rest of the file still counts.
 
 ### Session lifetime
 

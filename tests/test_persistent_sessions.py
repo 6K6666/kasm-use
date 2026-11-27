@@ -361,7 +361,8 @@ def test_the_default_session_never_moves_to_one_another_process_started(monkeypa
     assert a.default() == S1          # a's calls keep going to the session a started
     assert b.default() == S2
     assert a.resolve(S2) == S2        # once a names s2 itself, it is one of a's too
-    assert a.default() == S2
+    with pytest.raises(RuntimeError, match="You have 2 sessions"):
+        a.default()                   # and with two of its own, a must say which
 
 
 def test_stop_without_an_id_never_destroys_another_processs_session(monkeypatch, tmp_path):

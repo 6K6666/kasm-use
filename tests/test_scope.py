@@ -57,11 +57,14 @@ def test_own_session_is_resolved_with_or_without_dashes():
     assert tools._resolve_session({}) == "1b1a2009c172439f9c0a13110a5d9098"
 
 
-def test_default_is_most_recent_own_session():
+def test_with_two_sessions_of_its_own_a_call_must_say_which():
+    """Until 0.5.9 the later one was assumed; an input meant for one desktop went to the other."""
     tools._SESSIONS["aaa"] = {"started": 1, "workspace": "Chrome"}
     tools._SESSIONS["bbb"] = {"started": 2, "workspace": "Terminal"}
     tools._MINE.update(tools._SESSIONS)  # both started by this process
-    assert tools._resolve_session({}) == "bbb"
+    with pytest.raises(RuntimeError, match=r"You have 2 sessions, so say which one\. Pass session_id: aaa \(Chrome\), bbb \(Terminal\)\."):
+        tools._resolve_session({})
+    assert tools._resolve_session({"session_id": "bbb"}) == "bbb"
 
 
 def test_no_exec_or_screenshot_api_left():
