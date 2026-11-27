@@ -300,6 +300,31 @@ def test_stop_keeps_a_session_it_could_not_confirm_gone(monkeypatch, listed):
     assert SID in tools._SESSIONS
 
 
+@pytest.mark.parametrize("reply", [{}, {"kasms": None}, {"kasms": "busy"}, []])
+def test_stop_keeps_a_session_when_kasms_list_is_not_a_list(monkeypatch, reply):
+    """A reply without a session list says nothing about this session; dropping the record would
+    leave a live desktop that nothing tracks."""
+    def call(endpoint, **_):
+        if endpoint == "destroy_kasm":
+            raise RuntimeError(GONE)
+        return reply
+    monkeypatch.setattr(tools, "_call", call)
+    result = json.loads(tools.kasm_stop({"session_id": SID}))
+    assert (result["ok"], result["error"]) == (False, GONE)
+    assert SID in tools._SESSIONS
+
+
+def test_stop_keeps_a_session_when_kasm_cannot_be_reached(monkeypatch):
+    import urllib.error
+
+    def call(endpoint, **_):
+        raise urllib.error.URLError("connection refused")
+    monkeypatch.setattr(tools, "_call", call)
+    result = json.loads(tools.kasm_stop({"session_id": SID}))
+    assert result["ok"] is False and "connection refused" in result["error"]
+    assert SID in tools._SESSIONS
+
+
 def test_start_waits_for_the_controllers_first_report_and_says_queued(monkeypatch, tmp_path):
     """Seen 2026-11-27: a queued session was reported "preparing" because kasm_start answered before
     the controller's next pass had written its status file."""

@@ -1051,7 +1051,8 @@ def kasm_stop(args, **kw):
             # Whatever prepares a desktop may end the Kasm session of a launch that failed. Kasm then
             # refuses the ID; only its own list can say the session is gone and not merely unreachable.
             try:
-                listed = {_kid(k.get("kasm_id", "")) for k in _call("get_kasms").get("kasms", [])}
+                kasms = _call("get_kasms")["kasms"]  # a reply without the list says nothing about this session
+                listed = {_kid(k.get("kasm_id", "")) for k in kasms} if isinstance(kasms, list) else {kid}
             except Exception:
                 listed = {kid}
             if kid in listed:
