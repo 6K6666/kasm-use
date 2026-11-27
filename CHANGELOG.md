@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.4 — 2026-11-27
+
+Found by driving macOS Sequoia 15 (a QEMU guest) through a Server (VNC) workspace and through a
+container workspace whose viewer runs a VNC client. Verified live on both, and re-checked on Ubuntu
+Noble, Windows 11 (Notepad, through its FreeRDP viewer) and an xrdp desktop over Guacamole.
+
+- **Typing presses Shift itself for capitals and shifted symbols**, as a keyboard does. QEMU's VNC
+  server presses the key a character sits on and adds no Shift: `abc ABC 123 !@# <>? ~ (x) {y} |` arrived
+  as ``abc abc 123 123 §./ ` 9x0 [y] \``, and through a KasmVNC viewer capitals and `(`, `)`, `<` were
+  lost. A line holding every shifted US symbol now arrives exactly on all five desktops.
+  Shifted characters take four key events, so they type at half the speed of the others.
+- **A drag on a Server (Guacamole) desktop moves in steps.** Press, one jump and release were sent
+  in one burst, which left a macOS window where it was. It now presses, pauses 150 ms, moves in 12
+  steps 30 ms apart, pauses and releases, like the VNC transport (about 0.7 s for a drag).
+- **`cmd`, `command` and `option` are key names** (`cmd+space`, `cmd+q`). They are `super` and `alt`.
+- Not fixable here: the mouse wheel does not reach a macOS guest (the same result with clicks sent
+  one at a time, and through the viewer). `page_up` and `page_down` scroll. There is no clipboard
+  link to the guest, so `kasm_paste` cannot be used; `kasm_type` is exact for ASCII.
+
 ## 0.5.3 — 2026-11-27
 
 Found by driving a Windows 11 desktop through a Server (Guacamole) workspace; all three were

@@ -241,6 +241,16 @@ no clipboard on this transport, so `kasm_paste` is refused; `kasm_type` handles 
 After a reconnect Windows Terminal can keep showing its old contents until its window is resized
 (maximise it with `super+up`); other applications repaint by themselves.
 
+### macOS guests
+
+A macOS desktop served by QEMU's VNC server (for example a Dockur guest) works through a Server
+(VNC) workspace or through a viewer container. QEMU's VNC presses the key a character sits on and
+never adds Shift, so `kasm_type` holds Shift itself for capitals and shifted symbols; it does this
+on every desktop, because it is what a keyboard sends. Use `cmd` and `option` in `kasm_key`
+(`cmd+space` opens Spotlight). The mouse wheel does not reach the guest: scroll with `page_up` and
+`page_down`. Nothing links the clipboard, so use `kasm_type`, not `kasm_paste`. Measured on macOS
+Sequoia 15 with kasm-use 0.5.4.
+
 ### Slow-starting workspaces
 
 Kasm reports a session as running as soon as its container is up. Most desktops draw within a few

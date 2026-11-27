@@ -176,10 +176,10 @@ def test_browser_drives_exact_guacamole_frame(monkeypatch):
             desktop.combo([0xffe3, 0x61])
             events = desktop._eval("() => window.events")
         assert events[0] == [[2, 3, True, False, False, False, False], False]
-        assert events[6] == [[4, 5, False, False, True, False, False], False]
-        assert events[8] == [[3, 4, False, False, False, False, True], False]
-        assert events[12] == [1, 0xffe1]
-        assert events[15] == [0, 0xffe1]
+        assert [[4, 5, False, False, True, False, False], False] in events   # right button held at the drag's end
+        assert [[3, 4, False, False, False, False, True], False] in events   # wheel down
+        shift = events.index([1, 0xffe1])                                    # Shift around the sideways wheel
+        assert events[shift + 3] == [0, 0xffe1]
         assert events[-6:] == [[1, 233], [0, 233], [1, 0xffe3],
                               [1, 0x61], [0, 0x61], [0, 0xffe3]]
 
@@ -263,6 +263,24 @@ def test_look_says_when_a_guacamole_desktop_has_drawn_nothing(monkeypatch):
     assert "Screen is blank" in tools.kasm_look({"session_id": SID})["content"][0]["text"]
 
 
+def test_a_drag_presses_moves_in_steps_and_releases_over_time(monkeypatch):
+    """macOS under QEMU, 2026-11-27: press, one jump and release sent in one burst left a Terminal
+    window where it was. The VNC transport already drags in paced steps."""
+    monkeypatch.setattr(guac, "INPUT_SETTLE_SECONDS", 0)
+    with kasm_page("draw();") as url:
+        with guac.Session(SID, url, PATH, True) as desktop:
+            desktop.drag(2, 3, 20, 15, 1)
+            stamps, events = desktop._eval("() => [window.stamps, window.events]")
+    states = [event[0][:3] for event in events]
+    assert states[0] == [2, 3, False]                           # arrive without the button
+    assert states[1] == [2, 3, True]                            # press at the start
+    assert states[-2:] == [[20, 15, True], [20, 15, False]]     # reach the target, then release
+    assert all(held for _x, _y, held in states[1:-1])
+    assert len({(x, y) for x, y, _held in states[1:-1]}) >= 8   # intermediate positions, not one jump
+    assert stamps[-1] - stamps[0] >= 400
+    assert min(later - earlier for earlier, later in zip(stamps, stamps[1:])) >= guac.DRAG_DELAY_MS - 1
+
+
 def test_key_events_are_paced_so_windows_keeps_shift_and_unicode(monkeypatch):
     """Measured in Notepad on Windows 11, 2026-11-27: with no pause between key events "<ok> (a)"
     arrived as ",ok. 9a0" and the text was cut short; 5 ms still lost characters; 20 ms was exact."""
@@ -273,7 +291,9 @@ def test_key_events_are_paced_so_windows_keeps_shift_and_unicode(monkeypatch):
             desktop.type("<é")
             desktop.combo([0xffe3, 0x61])
             stamps, events = desktop._eval("() => [window.stamps, window.events]")
-    assert events == [[1, 0x3c], [0, 0x3c], [1, 0xe9], [0, 0xe9], [1, 0xffe3], [1, 0x61], [0, 0x61], [0, 0xffe3]]
+    # "<" is typed as a keyboard types it, inside Shift (QEMU's VNC adds no Shift of its own).
+    assert events == [[1, 0xffe1], [1, 0x3c], [0, 0x3c], [0, 0xffe1], [1, 0xe9], [0, 0xe9],
+                      [1, 0xffe3], [1, 0x61], [0, 0x61], [0, 0xffe3]]
     gaps = [later - earlier for earlier, later in zip(stamps, stamps[1:])]
     assert min(gaps) >= guac.KEY_DELAY_MS - 1
 

@@ -240,6 +240,7 @@ def test_screenshot_gives_up_when_the_desktop_never_settles():
     ("plus", 0x2B), ("minus", 0x2D), ("equal", 0x3D), ("comma", 0x2C), ("period", 0x2E),
     ("slash", 0x2F), ("backslash", 0x5C), ("capslock", 0xFFE5), ("CapsLock", 0xFFE5),
     ("f1", 0xFFBE), ("F12", 0xFFC9),
+    ("cmd", 0xFFEB), ("command", 0xFFEB), ("Cmd", 0xFFEB), ("option", 0xFFE9),  # macOS names for super and alt
 ])
 def test_punctuation_and_function_keys_have_names(name, sym):
     assert vnc.keysym(name) == sym
@@ -253,3 +254,32 @@ def test_an_unknown_key_name_lists_the_valid_ones():
     for name in ("plus", "capslock", "f12", "Return".lower(), "ctrl", "page_down"):
         assert name in message
     assert "single character" in message
+
+
+# ---------------------------------------------------------------------------- explicit Shift
+SHIFT = 0xFFE1
+
+
+def test_typing_holds_shift_for_a_capital_or_shifted_symbol_as_a_keyboard_does(monkeypatch):
+    """macOS under QEMU, 2026-11-27: QEMU's VNC server presses the key a keysym sits on and adds no
+    Shift, so "abc ABC 123 !@# <>? ~ (x) {y} |" arrived as "abc abc 123 123 §./ ` 9x0 [y] \\". Through a
+    KasmVNC viewer capitals and "(", ")", "<" were lost. A person's browser sends Shift as a key of
+    its own, and that arrived intact on every route."""
+    monkeypatch.setattr(vnc.time, "sleep", lambda s: None)
+    session = _bare_session()
+    session.type("a(B")
+    assert [struct.unpack(">BBxxI", message)[1:] for message in session.ws.sent] == [
+        (1, 0x61), (0, 0x61),
+        (1, SHIFT), (1, 0x28), (0, 0x28), (0, SHIFT),
+        (1, SHIFT), (1, 0x42), (0, 0x42), (0, SHIFT),
+    ]
+
+
+@pytest.mark.parametrize("ch", list('ABMZ~!@#$%^&*()_+{}|:"<>?'))
+def test_every_character_a_us_keyboard_shifts_is_typed_with_shift(ch):
+    assert vnc.char_keys(ch) == [SHIFT, ord(ch)]
+
+
+@pytest.mark.parametrize("ch", list("amz0189 `-=[]\\;',./") + ["\n", "\t", "é", "É", "日"])
+def test_other_characters_are_typed_alone(ch):
+    assert vnc.char_keys(ch) == [vnc.char_keysym(ch)]

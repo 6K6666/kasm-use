@@ -6,7 +6,7 @@ import struct
 import time
 from urllib.parse import urlsplit
 
-from .vnc import char_keysym
+from .vnc import char_keys
 
 _worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kasm-guac")
 _playwright = None
@@ -35,6 +35,11 @@ INPUT_SETTLE_SECONDS = 3
 # state late lose Shift and Unicode characters (Notepad, measured 2026-11-27: 0 and 5 ms corrupt
 # the text, 20 ms is exact). About 25 characters a second.
 KEY_DELAY_MS = 20
+# A drag sent as press, one jump and release in one burst moves nothing on macOS (QEMU's VNC,
+# measured 2026-11-27). Pause after each pointer state of a drag, as the VNC transport does.
+DRAG_DELAY_MS = 30
+DRAG_STEPS = 12
+DRAG_HOLD = 5  # repeats of the pressed state at each end: 150 ms before moving and before release
 _fresh = set()  # sessions whose browser attached and has not sent input yet
 _drawn_at = {}  # for those: when the first drawn frame was seen
 _FRAME = """async limit => {
@@ -140,6 +145,11 @@ def _evaluate(kid, url, path, verify_tls, script, data):
     return frame.evaluate(script, data)
 
 
+def _press(syms):
+    """Key states for holding the keys in order and releasing them in reverse."""
+    return [(sym, 1) for sym in syms] + [(sym, 0) for sym in reversed(syms)]
+
+
 class Session:
     """Expose the same screenshot and input operations as the VNC transport."""
 
@@ -187,27 +197,31 @@ class Session:
             time.sleep(max(0.0, _drawn_at[kid] + INPUT_SETTLE_SECONDS - time.monotonic()))
             _fresh.discard(kid)
 
-    def _mouse(self, states, *, shift=False):
+    def _mouse(self, states, *, shift=False, delay=0):
         self._settle()
-        self._eval("""({states, shift}) => {
+        self._eval("""async ({states, shift, delay}) => {
             if (shift) app.guac.sendKeyEvent(1, 0xffe1);
             try {
                 for (const [x, y, button] of states) {
                     app.guac.sendMouseState(new Guacamole.Mouse.State(
                         x, y, button === 1, button === 2, button === 3,
                         button === 4, button === 5), false);
+                    if (delay) await new Promise(resolve => setTimeout(resolve, delay));
                 }
                 app.mouse.lastActiveAt = Date.now();
             } finally {
                 if (shift) app.guac.sendKeyEvent(0, 0xffe1);
             }
-        }""", {"states": states, "shift": shift})
+        }""", {"states": states, "shift": shift, "delay": delay})
 
     def click(self, x, y, button, count):
         self._mouse([(x, y, state) for _ in range(count) for state in (button, 0)])
 
     def drag(self, x0, y0, x1, y1, button):
-        self._mouse([(x0, y0, 0), (x0, y0, button), (x1, y1, button), (x1, y1, 0)])
+        path = [(x0 + (x1 - x0) * i // DRAG_STEPS, y0 + (y1 - y0) * i // DRAG_STEPS, button)
+                for i in range(1, DRAG_STEPS + 1)]
+        self._mouse([(x0, y0, 0)] + [(x0, y0, button)] * DRAG_HOLD + path + [(x1, y1, button)] * DRAG_HOLD
+                    + [(x1, y1, 0)], delay=DRAG_DELAY_MS)
 
     def scroll(self, x, y, direction, amount):
         # Guacamole has only vertical wheel buttons. Windows apps commonly use Shift+wheel.
@@ -226,7 +240,7 @@ class Session:
         }""", {"states": states, "delay": KEY_DELAY_MS})
 
     def combo(self, syms):
-        self._keys([(sym, 1) for sym in syms] + [(sym, 0) for sym in reversed(syms)])
+        self._keys(_press(syms))
 
     def type(self, text):
-        self._keys([(char_keysym(ch), down) for ch in text for down in (1, 0)])
+        self._keys([state for ch in text for state in _press(char_keys(ch))])

@@ -1058,7 +1058,7 @@ _TOOLS = [
      "session's clipboard, then presses the paste shortcut. Terminals usually need shortcut \"ctrl+shift+v\". "
      "It replaces whatever was on the session's clipboard. If the session does not allow clipboard-in "
      "(Kasm's Allow Clipboard Up), the shortcut pastes the desktop's old clipboard instead, so check the "
-     "result. NEVER paste passwords, "
+     "result. A macOS desktop has no clipboard link: use kasm_type there. NEVER paste passwords, "
      "MFA codes, or payment details — stop and ask the owner to take over the session for those.",
      {"type": "object", "required": ["text"], "properties": {
          **_SID, "text": {"type": "string"},
@@ -1067,11 +1067,14 @@ _TOOLS = [
     ("kasm_key", kasm_key,
      "Press keys or shortcuts in the Kasm session. Join keys held together with + (ctrl+l, ctrl+shift+t, "
      "ctrl+plus) and separate presses with spaces (Tab Tab Return). A single letter or digit is itself. "
+     "On a macOS desktop use cmd and option (cmd+space, cmd+q, cmd+c). "
      f"Named keys: {vnc.KEY_NAMES}.",
      {"type": "object", "required": ["keys"], "properties": {
          **_SID, "keys": {"type": "string"},
          "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),
-    ("kasm_scroll", kasm_scroll, "Scroll the Kasm session, optionally at x,y from the latest kasm_look image.",
+    ("kasm_scroll", kasm_scroll,
+     "Scroll the Kasm session, optionally at x,y from the latest kasm_look image. A macOS desktop ignores "
+     "the wheel; press page_up or page_down with kasm_key there.",
      {"type": "object", "properties": {
          **_SID, "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
          "amount": {"type": "integer", "description": "Wheel clicks, 1-30 (default 5)"},

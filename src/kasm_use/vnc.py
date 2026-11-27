@@ -205,6 +205,7 @@ _NAMED = {
     "pagedown": 0xFF56, "next": 0xFF56, "left": 0xFF51, "up": 0xFF52, "right": 0xFF53, "down": 0xFF54,
     "space": 0x20, "ctrl": 0xFFE3, "control": 0xFFE3, "control_l": 0xFFE3, "shift": 0xFFE1,
     "shift_l": 0xFFE1, "alt": 0xFFE9, "alt_l": 0xFFE9, "super": 0xFFEB, "super_l": 0xFFEB,
+    "cmd": 0xFFEB, "command": 0xFFEB, "option": 0xFFE9,  # macOS: Command is super, Option is alt
     "meta": 0xFFE7, "win": 0xFFEB, "menu": 0xFF67, "print": 0xFF61, "capslock": 0xFFE5,
     "plus": 0x2B, "minus": 0x2D, "equal": 0x3D, "comma": 0x2C, "period": 0x2E, "slash": 0x2F, "backslash": 0x5C,
     **{f"f{i}": 0xFFBE + i - 1 for i in range(1, 13)},
@@ -230,6 +231,18 @@ def char_keysym(ch: str) -> int:
         return 0xFF09
     cp = ord(ch)
     return cp if 0x20 <= cp <= 0x7E or 0xA0 <= cp <= 0xFF else 0x01000000 + cp
+
+
+_US_SHIFTED = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZ~!@#$%^&*()_+{}|:"<>?')
+
+
+def char_keys(ch: str) -> list[int]:
+    """The keys to hold for one typed character: Shift first where a US keyboard needs it.
+
+    A real keyboard sends Shift as its own key. Servers that work out modifiers themselves (Xvnc,
+    guacd's RDP) accept that; QEMU's VNC server (macOS guests) only presses the key a keysym sits
+    on, so without it "(" arrives as "9" and "A" as "a"."""
+    return [_NAMED["shift"], char_keysym(ch)] if ch in _US_SHIFTED else [char_keysym(ch)]
 
 
 # ---------------------------------------------------------------------------------- ZRLE
@@ -510,4 +523,4 @@ class Session:
 
     def type(self, text: str) -> None:
         for ch in text:
-            self.combo([char_keysym(ch)])
+            self.combo(char_keys(ch))
