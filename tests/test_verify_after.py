@@ -12,6 +12,7 @@ PNG = b"\x89PNG\r\n\x1a\nverify-after-test"
 
 class FakeVNC:
     instances: ClassVar[list["FakeVNC"]] = []
+    frames: ClassVar[list[bytes]] = []  # what successive screenshots return; PNG once it is empty
 
     def __init__(self):
         self.width = 800
@@ -43,7 +44,7 @@ class FakeVNC:
 
     def screenshot(self):
         self.screenshots += 1
-        return PNG
+        return self.frames.pop(0) if self.frames else PNG
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +55,7 @@ def clean_session(monkeypatch):
     tools._STATE_LOADED = False
     tools._STATE_PATH = None
     FakeVNC.instances.clear()
+    FakeVNC.frames.clear()
     tools._SESSIONS[SID] = {"started": 1, "workspace": "Chrome"}
     tools._LAST_SHOT[SID] = (800, 600)
     monkeypatch.setattr(tools.time, "sleep", lambda *_: None)
@@ -87,11 +89,12 @@ def test_verify_after_reopens_same_session_and_returns_screenshot(monkeypatch, t
     assert opened == [SID, SID]
     assert len(FakeVNC.instances) == 2
     assert len(FakeVNC.instances[0].actions) == 1
-    assert FakeVNC.instances[1].screenshots == 1
+    assert FakeVNC.instances[1].screenshots == 2  # a second look that matches the first: nothing is moving
     assert result["_multimodal"] is True
     action = json.loads(result["content"][0]["text"])
     assert action["ok"] is True
-    assert action["verify_after"] == {"status": "screenshot_returned", "input_sent": True}
+    assert action["verify_after"] == {"status": "screenshot_returned", "input_sent": True,
+                                      "settled": True, "waited_seconds": 1.0}
     image = next(part for part in result["content"] if part["type"] == "image_url")
     encoded = image["image_url"]["url"].split(",", 1)[1]
     assert base64.b64decode(encoded) == PNG
@@ -140,3 +143,40 @@ def test_verify_after_false_keeps_existing_text_result(monkeypatch):
 
     assert result == {"ok": True, "session_id": SID, "clicked": [10, 20]}
     assert opened == [SID]
+
+
+def verified_click(monkeypatch, frames):
+    FakeVNC.frames[:] = frames
+    monkeypatch.setattr(tools, "_session", lambda _kid: FakeVNC())
+    result = tools.kasm_click({"session_id": SID, "x": 10, "y": 20, "verify_after": True})
+    image = next(part for part in result["content"] if part["type"] == "image_url")
+    shown = base64.b64decode(image["image_url"]["url"].split(",", 1)[1])
+    return json.loads(result["content"][0]["text"])["verify_after"], shown, FakeVNC.instances[1].screenshots
+
+
+@pytest.mark.parametrize(("frames", "samples", "shown"), [
+    ([b"A", b"A"], 2, b"A"),                    # nothing moved
+    ([b"A", b"B", b"C", b"C"], 4, b"C"),        # an animation that ends
+    ([b"A", b"B", b"A"], 3, b"A"),              # a blinking cursor
+])
+def test_verify_after_returns_the_screen_once_it_stops_changing(monkeypatch, frames, samples, shown):
+    """Seen 2026-11-27: the screenshot was taken the instant the input was sent, and showed Windows
+    in the middle of maximising a window."""
+    verify, image, taken = verified_click(monkeypatch, frames)
+    assert (taken, image) == (samples, shown)
+    assert verify == {"status": "screenshot_returned", "input_sent": True,
+                      "settled": True, "waited_seconds": samples * 0.5}
+
+
+def test_verify_after_gives_up_on_a_screen_that_never_settles(monkeypatch):
+    verify, image, taken = verified_click(monkeypatch, [bytes([n]) for n in range(20)])
+    assert (taken, image) == (8, bytes([7]))
+    assert (verify["settled"], verify["waited_seconds"]) == (False, 4.0)
+    assert verify["instruction"] == "The screen was still changing. Call kasm_look to see the final state."
+
+
+def test_verify_after_records_the_screenshot_size_for_the_next_click(monkeypatch):
+    tools._LAST_SHOT.clear()
+    tools._LAST_SHOT[SID] = (1024, 768)  # the desktop was resized since the last look
+    verified_click(monkeypatch, [])
+    assert tools._LAST_SHOT[SID] == (800, 600)

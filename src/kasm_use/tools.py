@@ -335,15 +335,16 @@ def _save_sessions() -> None:
 
 
 def _verify_after(kid: str, result: str, enabled: bool):
-    """Return a fresh screenshot with a successful action when requested."""
+    """Return a screenshot of the settled screen with a successful action when requested."""
     if not enabled:
         return result
     action = json.loads(result)
     if not action.get("ok"):
         return result
 
-    look = kasm_look({"session_id": kid, "wait_seconds": 0})
-    if not isinstance(look, dict) or not look.get("_multimodal"):
+    try:
+        png, size, blank, settled, waited = _settled_shot(kid)
+    except Exception:
         action["verify_after"] = {
             "status": "unavailable",
             "action_may_have_succeeded": True,
@@ -351,9 +352,12 @@ def _verify_after(kid: str, result: str, enabled: bool):
         }
         return json.dumps(action)
 
-    action["verify_after"] = {"status": "screenshot_returned", "input_sent": True}
+    action["verify_after"] = {"status": "screenshot_returned", "input_sent": True,
+                              "settled": settled, "waited_seconds": waited}
+    if not settled:
+        action["verify_after"]["instruction"] = "The screen was still changing. Call kasm_look to see the final state."
     text = json.dumps(action)
-    image_parts = [part for part in look["content"] if part.get("type") == "image_url"]
+    image_parts = [part for part in _look_result(kid, png, size, blank)["content"] if part.get("type") == "image_url"]
     return {
         "_multimodal": True,
         "content": [{"type": "text", "text": text}, *image_parts],
@@ -584,6 +588,34 @@ def _shot(kid: str) -> tuple[bytes, tuple[int, int], bool]:
     if not blank:
         _VISIBLE.add(kid)
     return png, size, blank
+
+
+# A screenshot taken the instant an input is sent shows the screen before it has reacted, or in the
+# middle of an animation (measured 2026-11-27). verify_after looks until two looks agree.
+VERIFY_POLL_SECONDS = 0.5
+VERIFY_MIN_SAMPLES = 2
+VERIFY_MAX_SAMPLES = 8
+
+
+def _settled_shot(kid: str) -> tuple[bytes, tuple[int, int], bool, bool, float]:
+    """A screenshot of the screen once it stopped changing: PNG, size, blank, settled, seconds waited.
+
+    Sampled on one connection. A sample equal to either of the two before it means nothing is moving;
+    comparing with two lets a blinking cursor, which alternates between two pictures, count as still.
+    """
+    seen: list[bytes] = []
+    with _session(kid) as s:
+        while True:
+            time.sleep(VERIFY_POLL_SECONDS)
+            png = s.screenshot()
+            settled = len(seen) + 1 >= VERIFY_MIN_SAMPLES and png in seen[-2:]
+            seen.append(png)
+            if settled or len(seen) >= VERIFY_MAX_SAMPLES:
+                break
+        size, blank = (s.width, s.height), bool(getattr(s, "blank", False))
+    if not blank:
+        _VISIBLE.add(kid)
+    return png, size, blank, settled, len(seen) * VERIFY_POLL_SECONDS
 
 
 def _wait_visible(kid: str, seconds: float) -> bool:
@@ -848,6 +880,23 @@ def kasm_wait(args, **kw):
         return _err(str(e))
 
 
+def _look_result(kid: str, png: bytes, size: tuple[int, int], blank: bool) -> dict:
+    """A screenshot as a tool result; clicks are mapped against its size from here on."""
+    _LAST_SHOT[kid] = size
+    summary = (f"Screenshot of Kasm session {kid[:8]} ({size[0]}x{size[1]}, live). Give kasm_click / kasm_drag / "
+               f"kasm_scroll coordinates in THIS image's pixels.")
+    if blank:
+        summary += " Screen is blank; the desktop is still starting. Wait and call kasm_look again."
+    return {
+        "_multimodal": True,
+        "content": [
+            {"type": "text", "text": summary},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}},
+        ],
+        "text_summary": summary,
+    }
+
+
 def kasm_look(args, **kw):
     try:
         kid = _ready_session(args)
@@ -855,20 +904,7 @@ def kasm_look(args, **kw):
         if not math.isfinite(delay):
             return _err("wait_seconds must be finite")
         time.sleep(max(0.0, min(delay, 30.0)))
-        png, size, blank = _shot(kid)
-        _LAST_SHOT[kid] = size
-        summary = (f"Screenshot of Kasm session {kid[:8]} ({size[0]}x{size[1]}, live). Give kasm_click / kasm_drag / "
-                   f"kasm_scroll coordinates in THIS image's pixels.")
-        if blank:
-            summary += " Screen is blank; the desktop is still starting. Wait and call kasm_look again."
-        return {
-            "_multimodal": True,
-            "content": [
-                {"type": "text", "text": summary},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}},
-            ],
-            "text_summary": summary,
-        }
+        return _look_result(kid, *_shot(kid))
     except Exception as e:
         return _err(str(e))
 
@@ -1035,6 +1071,8 @@ def kasm_stop(args, **kw):
 _SID = {"session_id": {"type": "string",
                        "description": "A session started by kasm_start. Omit to use the most recent one."}}
 
+_VERIFY = "Return a screenshot with the result, taken once the screen has stopped changing (up to 4 s)."
+
 _TOOLS = [
     ("kasm_list", kasm_list, "List Kasm workspaces you can start, and the sessions you started.",
      {"type": "object", "properties": {}}),
@@ -1063,14 +1101,15 @@ _TOOLS = [
          **_SID, "timeout_seconds": {"type": "number", "description": "How long to wait, 5-90 (default 60)."}}}),
     ("kasm_look", kasm_look,
      "Live screenshot of your Kasm session. Look before clicking. After an action, use verify_after=true "
-     "to return a screenshot with the action, or call kasm_look to inspect the result.",
+     "to return a screenshot with the action, or call kasm_look to inspect the result. A program that "
+     "takes seconds to open may appear after a verify_after screenshot; call kasm_look for it.",
      {"type": "object", "properties": {**_SID, "wait_seconds": {"type": "number", "description": "Pause before capturing (default 2)."}}}),
     ("kasm_click", kasm_click, "Click at x,y in the coordinate space of the latest kasm_look image.",
      {"type": "object", "required": ["x", "y"], "properties": {
          **_SID, "x": {"type": "integer"}, "y": {"type": "integer"},
          "button": {"type": "string", "enum": ["left", "right", "middle"]},
          "double": {"type": "boolean"},
-         "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),
+         "verify_after": {"type": "boolean", "description": _VERIFY}}}),
     ("kasm_drag", kasm_drag,
      "Drag with the mouse held down from one point to another, in the coordinate space of the latest "
      "kasm_look image: move menu items, drag windows or tabs, move sliders, select text, drag and drop.",
@@ -1078,13 +1117,13 @@ _TOOLS = [
          **_SID, "from_x": {"type": "integer"}, "from_y": {"type": "integer"},
          "to_x": {"type": "integer"}, "to_y": {"type": "integer"},
          "button": {"type": "string", "enum": ["left", "right", "middle"]},
-         "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),
+         "verify_after": {"type": "boolean", "description": _VERIFY}}}),
     ("kasm_type", kasm_type,
      "Type text into the focused field of the Kasm session (click the field first). NEVER type passwords, "
      "MFA codes, or payment details — stop and ask the owner to take over the session for those.",
      {"type": "object", "required": ["text"], "properties": {
          **_SID, "text": {"type": "string"}, "press_enter": {"type": "boolean"},
-         "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),
+         "verify_after": {"type": "boolean", "description": _VERIFY}}}),
     ("kasm_paste", kasm_paste,
      "Paste text into the focused field through the clipboard: fast, and exact for any characters. Sets the "
      "session's clipboard, then presses the paste shortcut. Terminals usually need shortcut \"ctrl+shift+v\". "
@@ -1095,7 +1134,7 @@ _TOOLS = [
      {"type": "object", "required": ["text"], "properties": {
          **_SID, "text": {"type": "string"},
          "shortcut": {"type": "string", "description": "Paste shortcut (default ctrl+v)."},
-         "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),
+         "verify_after": {"type": "boolean", "description": _VERIFY}}}),
     ("kasm_key", kasm_key,
      "Press keys or shortcuts in the Kasm session. Join keys held together with + (ctrl+l, ctrl+shift+t, "
      "ctrl+plus) and separate presses with spaces (Tab Tab Return). A single letter or digit is itself. "
@@ -1103,7 +1142,7 @@ _TOOLS = [
      f"Named keys: {vnc.KEY_NAMES}.",
      {"type": "object", "required": ["keys"], "properties": {
          **_SID, "keys": {"type": "string"},
-         "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),
+         "verify_after": {"type": "boolean", "description": _VERIFY}}}),
     ("kasm_scroll", kasm_scroll,
      "Scroll the Kasm session, optionally at x,y from the latest kasm_look image. A macOS desktop ignores "
      "the wheel; press page_up or page_down with kasm_key there.",
@@ -1111,7 +1150,7 @@ _TOOLS = [
          **_SID, "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
          "amount": {"type": "integer", "description": "Wheel clicks, 1-30 (default 5)"},
          "x": {"type": "integer"}, "y": {"type": "integer"},
-         "verify_after": {"type": "boolean", "description": "Return a fresh screenshot after sending the input."}}}),
+         "verify_after": {"type": "boolean", "description": _VERIFY}}}),
     ("kasm_stop", kasm_stop, "Stop (destroy) a session you started, when the task is finished or the owner asks.",
      {"type": "object", "properties": {**_SID}}),
 ]

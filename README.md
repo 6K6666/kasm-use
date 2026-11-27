@@ -64,7 +64,7 @@ MCP client are the most useful details.
 | `kasm_scroll` | Scroll, optionally at a point |
 | `kasm_stop` | Destroy the session |
 
-Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, or `kasm_scroll` to return a fresh screenshot with the action result. Inspect the screenshot to decide whether the action worked. If the screenshot is unavailable, the input may still have been sent; call `kasm_look` before retrying.
+Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, or `kasm_scroll` to return a screenshot with the action result. It is taken once the screen has stopped changing: kasm-use looks every half second until two looks agree (a blinking cursor counts as still), for 4 seconds at most, and the result says `settled` and `waited_seconds`. A program that takes seconds to open may still appear later; call `kasm_look` for it. Inspect the screenshot to decide whether the action worked. If the screenshot is unavailable, the input may still have been sent; call `kasm_look` before retrying.
 
 ## Requirements
 
