@@ -97,6 +97,7 @@ _KEEPALIVE_WARNED: set[str] = set()
 STATUS_GRACE_SECONDS = 60  # how long a status-file session may go unreported before it has failed
 STATUS_APPEAR_SECONDS = 10  # how long kasm_start waits for a status-file session's first report
 STATUS_STALE_SECONDS = 900  # a queued or preparing status nobody has rewritten for this long is a dead controller
+SLOW_STEP_FACTOR = 2  # a step this many times longer than usual (plus a minute) is called slow
 
 
 # ----------------------------------------------------------------------------------- API
@@ -338,8 +339,12 @@ def _save_sessions() -> None:
             os.close(lock)
 
 
-def _verify_after(kid: str, result: str, enabled: bool):
-    """Return a screenshot of the settled screen with a successful action when requested."""
+def _verify_after(kid: str, result: str, enabled: bool, before: bytes | None = None, opens: bool = False):
+    """Return a screenshot of the settled screen with a successful action when requested.
+
+    `before` is the screen as it was just before the input; the screen counts as settled only once it
+    has shown something else, so an input the desktop has not reacted to yet is not reported as done.
+    `opens` marks an input that often opens a program (an Enter, a double-click): it waits longer."""
     if not enabled:
         return result
     action = json.loads(result)
@@ -347,7 +352,7 @@ def _verify_after(kid: str, result: str, enabled: bool):
         return result
 
     try:
-        png, size, blank, settled, waited = _settled_shot(kid)
+        png, size, blank, settled, changed, waited = _settled_shot(kid, before, VERIFY_OPEN_SECONDS if opens else 0.0)
     except Exception:
         action["verify_after"] = {
             "status": "unavailable",
@@ -356,10 +361,18 @@ def _verify_after(kid: str, result: str, enabled: bool):
         }
         return json.dumps(action)
 
-    action["verify_after"] = {"status": "screenshot_returned", "input_sent": True,
+    action["verify_after"] = {"status": "screenshot_returned", "input_sent": True, "changed": changed,
                               "settled": settled, "waited_seconds": waited, "screen": list(size)}
-    if not settled:
+    if not changed:
+        action["verify_after"]["instruction"] = ("The screen has not changed since the input was sent. The desktop "
+                                                 "may still be reacting: call kasm_look before sending it again.")
+    elif not settled:
         action["verify_after"]["instruction"] = "The screen was still changing. Call kasm_look to see the final state."
+    elif opens:
+        # Measured 2026-11-28: macOS Messages and Music drew their windows after 3.6 s of a still screen.
+        action["verify_after"]["instruction"] = ("If this opened a program that is not in the picture, it may still be "
+                                                 "starting: call kasm_look with wait_seconds 3 before sending the "
+                                                 "input again.")
     text = json.dumps(action)
     image_parts = [part for part in _look_result(kid, png, size, blank)["content"] if part.get("type") == "image_url"]
     return {
@@ -427,8 +440,30 @@ def _refuse_unsupported(kid: str, tool: str) -> None:
         raise RuntimeError(why)
 
 
+def _progress(status: dict, state: str) -> dict:
+    """How far a launch is, from what prepares the desktop: seconds since it began, and while it is
+    still preparing, the step, seconds in it, and how long it usually takes. Malformed is ignored whole."""
+    def number(key, top):
+        value = status.get(key)
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        return value if ok and 0 <= value <= top else None
+
+    now = time.time()
+    started, updated = number("started", now + 60), number("updated", now + 60)
+    if started is None or updated is None:
+        return {}
+    progress = {"elapsed_seconds": max(0, int(now - started))}
+    step, steps, usually = number("step", 50), number("steps", 50), number("usually_seconds", 3600)
+    if (state == "preparing" and isinstance(step, int) and isinstance(steps, int) and 1 <= step <= steps
+            and usually is not None):
+        progress.update(step=f"{step} of {steps}", step_seconds=max(0, int(now - updated)),
+                        usually_seconds=int(usually))
+    return progress
+
+
 def _session_state(kid: str) -> dict:
-    """{"state": queued|preparing|ready|failed, "detail": str, "typing": ascii|unicode, "unsupported"?: dict}."""
+    """{"state": queued|preparing|ready|failed, "detail": str, "typing": ascii|unicode, "progress"?: dict,
+    "unsupported"?: dict}."""
     creds = _SESSIONS.get(kid) or {}
     path = _status_file(kid)
     if path is None:
@@ -444,8 +479,9 @@ def _session_state(kid: str) -> dict:
             if state in ("queued", "preparing") and time.time() - updated > STATUS_STALE_SECONDS:
                 return {"state": "failed", "detail": "The desktop's controller stopped reporting this session.",
                         "typing": typing}
-            limits = _unsupported(status)
-            return {"state": state, "detail": detail, "typing": typing, **({"unsupported": limits} if limits else {})}
+            limits, progress = _unsupported(status), _progress(status, state)
+            return {"state": state, "detail": detail, "typing": typing, **({"progress": progress} if progress else {}),
+                    **({"unsupported": limits} if limits else {})}
     except (OSError, ValueError, KeyError, TypeError):
         pass  # unreadable or malformed counts as missing
     if time.time() - creds.get("started", 0) < STATUS_GRACE_SECONDS:
@@ -618,34 +654,48 @@ def _shot(kid: str) -> tuple[bytes, tuple[int, int], bool]:
 
 
 # A screenshot taken the instant an input is sent shows the screen before it has reacted, or in the
-# middle of an animation (measured 2026-11-27). verify_after looks until two looks agree.
+# middle of an animation (measured 2026-11-27). verify_after looks until the screen has changed and
+# then held still for VERIFY_STILL_LOOKS looks in a row. One still look (half a second) was too
+# few: macOS opening a program pauses 0.5-1.2 s between drawing steps (measured 2026-11-28).
 VERIFY_POLL_SECONDS = 0.5
-VERIFY_MIN_SAMPLES = 2
+VERIFY_STILL_LOOKS = 2
 VERIFY_MAX_SECONDS = 4.0
+# After an Enter or a double-click, which often opens a program, the screen is not called settled
+# this early. macOS closed Spotlight within 0.9 s, then showed nothing new for 1.2-2.3 s before the
+# program's window, 2.0-3.9 s after the Enter (measured 2026-11-28, eight programs).
+VERIFY_OPEN_SECONDS = 3.0
 
 
-def _settled_shot(kid: str) -> tuple[bytes, tuple[int, int], bool, bool, float]:
-    """A screenshot of the screen once it stopped changing: PNG, size, blank, settled, seconds waited.
+def _settled_shot(kid: str, before: bytes | None = None,
+                  at_least: float = 0.0) -> tuple[bytes, tuple[int, int], bool, bool, bool, float]:
+    """The screen once it stopped changing: PNG, size, blank, settled, changed, seconds waited.
 
     Sampled on one connection. A sample equal to either of the two before it means nothing is moving;
     comparing with two lets a blinking cursor, which alternates between two pictures, count as still.
+    `changed` says whether any sample differed from `before` (always true without one). Nothing is
+    settled before `at_least` seconds, and the wait then gives up two seconds later at the earliest.
     """
     began = time.monotonic()
+    limit = max(VERIFY_MAX_SECONDS, at_least + 2.0)
     seen: list[bytes] = []
+    still, changed = 0, before is None
     with _session(kid) as s:
         while True:
             # One look per interval, counting what the look itself takes: half a second for a
             # 1280x800 desktop, which a fixed sleep would add to every interval.
             time.sleep(max(0.0, began + (len(seen) + 1) * VERIFY_POLL_SECONDS - time.monotonic()))
             png = s.screenshot()
-            settled = len(seen) + 1 >= VERIFY_MIN_SAMPLES and png in seen[-2:]
+            still = still + 1 if png in seen[-2:] else 0
+            changed = changed or png != before
             seen.append(png)
-            if settled or time.monotonic() - began >= VERIFY_MAX_SECONDS:
+            elapsed = time.monotonic() - began
+            settled = changed and still >= VERIFY_STILL_LOOKS and elapsed >= at_least
+            if settled or elapsed >= limit:
                 break
         size, blank = (s.width, s.height), bool(getattr(s, "blank", False))
     if not blank:
         _VISIBLE.add(kid)
-    return png, size, blank, settled, round(time.monotonic() - began, 1)
+    return png, size, blank, settled, changed, round(time.monotonic() - began, 1)
 
 
 def _wait_visible(kid: str, seconds: float) -> bool:
@@ -917,7 +967,7 @@ def kasm_start(args, **kw):
                     break
                 time.sleep(0.5)
             status = _session_state(kid)
-            state, detail = status["state"], {"detail": status["detail"]}
+            state, detail = status["state"], {"detail": status["detail"], **status.get("progress", {})}
         elif transport == "guac":
             # shortcut: a Guacamole desktop is reported ready unseen; probing it would open a browser here.
             state = "ready"
@@ -961,7 +1011,13 @@ def kasm_wait(args, **kw):
             status = ({"state": "preparing", "detail": "The screen is still blank."} if connected or not unreachable
                       else {"state": "preparing", "detail": "Kasm is still starting the session."} if _starting(kid)
                       else {"state": "failed", "detail": f"Could not reach the desktop: {unreachable}"})
-        return _ok(session_id=kid, state=status["state"], detail=status["detail"], waited_seconds=waited)
+        progress = status.get("progress", {})
+        slow = ({"note": "This step is taking much longer than usual. Keep calling kasm_wait: a launch that "
+                         "fails says so with state failed."}
+                if progress.get("step_seconds", 0) > SLOW_STEP_FACTOR * progress.get("usually_seconds", 0) + 60
+                else {})
+        return _ok(session_id=kid, state=status["state"], detail=status["detail"], **progress, **slow,
+                   waited_seconds=waited)
     except Exception as e:
         return _err(str(e))
 
@@ -1000,9 +1056,11 @@ def kasm_click(args, **kw):
         kid = _ready_session(args)
         button = {"left": 1, "middle": 2, "right": 3}.get(args.get("button", "left"), 1)
         with _session(kid) as s:
+            before = s.screenshot() if args.get("verify_after") else None  # what the input must change
             s.click(*_to_desktop(kid, args["x"], args["y"], s.width, s.height), button,
                     2 if args.get("double") else 1)
-        return _verify_after(kid, _ok(session_id=kid, clicked=[args["x"], args["y"]]), args.get("verify_after"))
+        return _verify_after(kid, _ok(session_id=kid, clicked=[args["x"], args["y"]]), args.get("verify_after"),
+                             before, opens=bool(args.get("double")))
     except Exception as e:
         return _err(str(e))
 
@@ -1012,13 +1070,14 @@ def kasm_drag(args, **kw):
         kid = _ready_session(args)
         button = {"left": 1, "middle": 2, "right": 3}.get(args.get("button", "left"), 1)
         with _session(kid) as s:
+            before = s.screenshot() if args.get("verify_after") else None  # what the input must change
             start = _to_desktop(kid, args["from_x"], args["from_y"], s.width, s.height)
             end = _to_desktop(kid, args["to_x"], args["to_y"], s.width, s.height)
             s.drag(*start, *end, button)
         return _verify_after(
             kid,
             _ok(session_id=kid, dragged=[[args["from_x"], args["from_y"]], [args["to_x"], args["to_y"]]]),
-            args.get("verify_after"),
+            args.get("verify_after"), before,
         )
     except Exception as e:
         return _err(str(e))
@@ -1041,6 +1100,7 @@ def kasm_type(args, **kw):
                 return _err(f"This session cannot type: {' '.join(bad)}. Nothing was typed. "
                             "Use kasm_paste for this text.")
         with _session(kid) as s:
+            before = s.screenshot() if args.get("verify_after") else None  # what the input must change
             s.type(text)
             if args.get("press_enter"):
                 time.sleep(ENTER_PAUSE_SECONDS)
@@ -1048,7 +1108,7 @@ def kasm_type(args, **kw):
         return _verify_after(
             kid,
             _ok(session_id=kid, typed_chars=len(text), pressed_enter=bool(args.get("press_enter"))),
-            args.get("verify_after"),
+            args.get("verify_after"), before, opens=bool(args.get("press_enter")) or "\n" in text,
         )
     except Exception as e:
         return _err(str(e))
@@ -1075,6 +1135,7 @@ def kasm_paste(args, **kw):
         with _session(kid) as s:
             if not hasattr(s, "set_clipboard"):
                 return _err("This workspace's connection has no clipboard. Use kasm_type.")
+            before = s.screenshot() if args.get("verify_after") else None  # what the input must change
             s.set_clipboard(text)
             time.sleep(PASTE_SETTLE_SECONDS)  # let the desktop see the new clipboard before the shortcut
             s.combo(combo)
@@ -1082,8 +1143,9 @@ def kasm_paste(args, **kw):
         return _verify_after(
             kid,
             _ok(session_id=kid, pasted_chars=len(text), shortcut=shortcut,
-                note="Clipboard set and shortcut sent. The desktop gives no confirmation; check with kasm_look."),
-            args.get("verify_after"))
+                **({} if args.get("verify_after") else
+                   {"note": "Clipboard set and shortcut sent. The desktop gives no confirmation; check with kasm_look."})),
+            args.get("verify_after"), before)
     except Exception as e:
         return _err(str(e))
 
@@ -1098,9 +1160,11 @@ def kasm_key(args, **kw):
         combos = [[vnc.keysym(part) for part in k.split("+") if part] for k in keys]
         kid = _ready_session(args)
         with _session(kid) as s:
+            before = s.screenshot() if args.get("verify_after") else None  # what the input must change
             for combo in combos:
                 s.combo(combo)
-        return _verify_after(kid, _ok(session_id=kid, keys=keys), args.get("verify_after"))
+        return _verify_after(kid, _ok(session_id=kid, keys=keys), args.get("verify_after"), before,
+                             opens=any(vnc.keysym("Return") in combo for combo in combos))
     except Exception as e:
         return _err(str(e))
 
@@ -1114,13 +1178,14 @@ def kasm_scroll(args, **kw):
             return _err("direction must be up, down, left or right")
         _refuse_unsupported(kid, "kasm_scroll")
         with _session(kid) as s:
+            before = s.screenshot() if args.get("verify_after") else None  # what the input must change
             if "x" in args and "y" in args:
                 x, y = _to_desktop(kid, args["x"], args["y"], s.width, s.height)
             else:
                 x, y = s.width // 2, s.height // 2
             s.scroll(x, y, direction, amount)
         return _verify_after(
-            kid, _ok(session_id=kid, direction=direction, amount=amount), args.get("verify_after")
+            kid, _ok(session_id=kid, direction=direction, amount=amount), args.get("verify_after"), before
         )
     except Exception as e:
         return _err(str(e))
@@ -1171,8 +1236,11 @@ _SID = {"session_id": {"type": "string",
                        "description": "A session you started or attached to. May be omitted only while you "
                                       "have a single session."}}
 
-_VERIFY = ("Return a screenshot with the result, taken once the screen has stopped changing (about 4 s at most), and "
-           "the screen's size. A still screen is not a finished command: check the picture for the result.")
+_VERIFY = ("Return a screenshot with the result, taken once the screen has changed and then stayed still for 1 s "
+           "(about 4 s at most; after an Enter or a double-click, which often open a program, at least 3 s and "
+           "about 5 s at most), and the screen's size. settled only means the screen stopped changing: a "
+           "program that is still opening can appear later, so check the picture. changed false means the "
+           "desktop showed no reaction yet; call kasm_look before sending the input again.")
 
 _TOOLS = [
     ("kasm_list", kasm_list,
@@ -1206,7 +1274,9 @@ _TOOLS = [
     ("kasm_wait", kasm_wait,
      "Wait until a session's desktop is ready to look at and use. Returns its state: ready, preparing, queued "
      "or failed, with a detail line. Some desktops take minutes to prepare; while the state is preparing or "
-     "queued, call kasm_wait again. Each call returns within timeout_seconds.",
+     "queued, call kasm_wait again. Those also report elapsed_seconds since the launch began, the step "
+     "(like 4 of 6), step_seconds spent in it and usually_seconds it takes. Each call returns within "
+     "timeout_seconds.",
      {"type": "object", "properties": {
          **_SID, "timeout_seconds": {"type": "number", "description": "How long to wait (default 60). Values outside 5-90 "
                                                              "are brought into that range."}}}),

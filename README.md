@@ -65,9 +65,9 @@ MCP client are the most useful details.
 | `kasm_scroll` | Scroll, optionally at a point |
 | `kasm_stop` | Destroy the session. An attached session is released instead and keeps running |
 
-Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, or `kasm_scroll` to return a screenshot with the action result. It is taken once the screen has stopped changing: kasm-use looks every half second until two looks agree (a blinking cursor counts as still), for about 4 seconds (the look that ends the wait is not counted), and the result says `settled` and `waited_seconds`. A program that takes seconds to open may still appear later; call `kasm_look` for it. Inspect the screenshot to decide whether the action worked.
+Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_paste`, `kasm_key`, or `kasm_scroll` to return a screenshot with the action result. kasm-use looks at the screen just before sending the input, then every half second after it, until the screen has changed and then stayed still for three looks in a row (1 s; a blinking cursor counts as still), for about 4 seconds (the look that ends the wait is not counted). After an Enter (`kasm_key` Return, `kasm_type` with `press_enter` or a newline) or a double-click, which often open a program, it waits at least 3 seconds and about 5 at most: macOS showed nothing new for 1.2-2.3 s between closing Spotlight and drawing the program's window. A large program starting cold can stay invisible longer than that, so such a result also says to look again before repeating the input. The result says `changed`, `settled` and `waited_seconds`. `settled` describes the screen only: a program that takes seconds to open may still appear later, so call `kasm_look` for it. `changed: false` means the desktop has shown no reaction yet; look again before sending the input a second time. Inspect the screenshot to decide whether the action worked.
 
-What a call costs on the server (measured 2026-11-27 on an Ubuntu Noble session, 1280x800): `kasm_key` 0.1 s (ten calls, all 0.1 s), `kasm_look` 0.5 s with `wait_seconds: 0`, an input with `verify_after` 1.5 s on a still screen. Anything beyond that in a client's timings is the client's own round trip. If the screenshot is unavailable, the input may still have been sent; call `kasm_look` before retrying.
+What a call costs on the server (measured 2026-11-27 on an Ubuntu Noble session, 1280x800): `kasm_key` 0.1 s (ten calls, all 0.1 s), `kasm_look` 0.5 s with `wait_seconds: 0`, an input with `verify_after` 1.5 s on a still screen (as measured for 0.5.10; from 0.5.11 add half a second for the look before the input and another for the longer still period, and an input that changes nothing waits the full 4 s). Anything beyond that in a client's timings is the client's own round trip. If the screenshot is unavailable, the input may still have been sent; call `kasm_look` before retrying.
 
 ## Requirements
 
@@ -277,8 +277,15 @@ any further such workspaces in `KASM_STATUS_WORKSPACE_IDS`. For each session the
 controller publishes `<session_id>.json` (the 32-character ID, no dashes):
 
 ```json
-{"session_id": "…", "phase": "preparing", "detail": "Signing in", "typing": "ascii", "updated": 1700000000.0}
+{"session_id": "…", "phase": "preparing", "detail": "Signing in", "typing": "ascii", "updated": 1700000000.0,
+ "started": 1699999800.0, "step": 4, "steps": 6, "usually_seconds": 45}
 ```
+
+`started`, `step`, `steps` and `usually_seconds` are optional. With `started`, `kasm_start` and
+`kasm_wait` report `elapsed_seconds` since the launch began. While the phase is `preparing`, a
+`step` also gives `step` ("4 of 6"), `step_seconds` (since `updated`, so the controller rewrites the
+file when a step begins) and `usually_seconds`; a step that has taken more than twice its usual time
+plus a minute adds a note saying so. Values out of range are left out.
 
 `phase` is `queued`, `preparing`, `ready` or `failed`. `typing` is `ascii` when the desktop can only
 receive ASCII keystrokes, otherwise `unicode`. While the phase is `queued` or `preparing`, `kasm_look`

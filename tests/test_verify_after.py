@@ -82,7 +82,7 @@ def clean_session(monkeypatch):
         (tools.kasm_click, {"x": 10, "y": 20}),
         (tools.kasm_drag, {"from_x": 10, "from_y": 20, "to_x": 30, "to_y": 40}),
         (tools.kasm_type, {"text": "hello"}),
-        (tools.kasm_key, {"keys": "Return"}),
+        (tools.kasm_key, {"keys": "Tab"}),  # an Enter waits longer, below
         (tools.kasm_scroll, {"direction": "down", "amount": 2, "x": 10, "y": 20}),
     ],
 )
@@ -94,17 +94,19 @@ def test_verify_after_reopens_same_session_and_returns_screenshot(monkeypatch, t
         return FakeVNC()
 
     monkeypatch.setattr(tools, "_session", open_session)
+    FakeVNC.frames[:] = [b"before the input"]
     result = tool({"session_id": SID, "verify_after": True, **args})
 
     assert opened == [SID, SID]
     assert len(FakeVNC.instances) == 2
     assert len(FakeVNC.instances[0].actions) == 1
-    assert FakeVNC.instances[1].screenshots == 2  # a second look that matches the first: nothing is moving
+    assert FakeVNC.instances[0].screenshots == 1  # the screen as it was, on the input's own connection
+    assert FakeVNC.instances[1].screenshots == 3  # changed, then two looks that show nothing new
     assert result["_multimodal"] is True
     action = json.loads(result["content"][0]["text"])
     assert action["ok"] is True
-    assert action["verify_after"] == {"status": "screenshot_returned", "input_sent": True,
-                                      "settled": True, "waited_seconds": 1.0, "screen": [800, 600]}
+    assert action["verify_after"] == {"status": "screenshot_returned", "input_sent": True, "changed": True,
+                                      "settled": True, "waited_seconds": 1.5, "screen": [800, 600]}
     image = next(part for part in result["content"] if part["type"] == "image_url")
     encoded = image["image_url"]["url"].split(",", 1)[1]
     assert base64.b64decode(encoded) == PNG
@@ -164,25 +166,86 @@ def verified_click(monkeypatch, frames):
     return json.loads(result["content"][0]["text"])["verify_after"], shown, FakeVNC.instances[1].screenshots
 
 
+# The first frame is the screen just before the input; the rest are the looks after it.
 @pytest.mark.parametrize(("frames", "samples", "shown"), [
-    ([b"A", b"A"], 2, b"A"),                    # nothing moved
-    ([b"A", b"B", b"C", b"C"], 4, b"C"),        # an animation that ends
-    ([b"A", b"B", b"A"], 3, b"A"),              # a blinking cursor
+    ([b"Z", b"A", b"A", b"A"], 3, b"A"),                    # changed once, then still
+    ([b"Z", b"A", b"B", b"C", b"C", b"C"], 5, b"C"),        # an animation that ends
+    ([b"Z", b"A", b"B", b"A", b"B"], 4, b"B"),              # a blinking cursor
+    ([b"Z", b"A", b"A", b"B", b"B", b"B"], 5, b"B"),        # a program that pauses while it opens
 ])
 def test_verify_after_returns_the_screen_once_it_stops_changing(monkeypatch, frames, samples, shown):
     """Seen 2026-11-27: the screenshot was taken the instant the input was sent, and showed Windows
-    in the middle of maximising a window."""
+    in the middle of maximising a window. Seen 2026-11-28: macOS paused half a second while opening
+    TextEdit and one still look was taken for the end."""
     verify, image, taken = verified_click(monkeypatch, frames)
     assert (taken, image) == (samples, shown)
-    assert verify == {"status": "screenshot_returned", "input_sent": True,
+    assert verify == {"status": "screenshot_returned", "input_sent": True, "changed": True,
                       "settled": True, "waited_seconds": samples * 0.5, "screen": [800, 600]}
 
 
 def test_verify_after_gives_up_on_a_screen_that_never_settles(monkeypatch):
     verify, image, taken = verified_click(monkeypatch, [bytes([n]) for n in range(20)])
-    assert (taken, image) == (8, bytes([7]))
-    assert (verify["settled"], verify["waited_seconds"]) == (False, 4.0)
+    assert (taken, image) == (8, bytes([8]))
+    assert (verify["changed"], verify["settled"], verify["waited_seconds"]) == (True, False, 4.0)
     assert verify["instruction"] == "The screen was still changing. Call kasm_look to see the final state."
+
+
+def test_verify_after_does_not_call_an_unchanged_screen_settled(monkeypatch):
+    """An input the desktop has not reacted to yet is not done: an agent told it was settled would
+    send it again and open the program twice."""
+    verify, image, taken = verified_click(monkeypatch, [])  # every look shows the screen as it was
+    assert (taken, image) == (8, PNG)
+    assert (verify["changed"], verify["settled"], verify["waited_seconds"]) == (False, False, 4.0)
+    assert "call kasm_look before sending it again" in verify["instruction"]
+
+
+@pytest.mark.parametrize(("tool", "args"), [
+    (tools.kasm_key, {"keys": "Return"}),
+    (tools.kasm_key, {"keys": "ctrl+l enter"}),
+    (tools.kasm_type, {"text": "Calculator", "press_enter": True}),
+    (tools.kasm_type, {"text": "ls\n"}),
+    (tools.kasm_click, {"x": 10, "y": 20, "double": True}),
+])
+def test_an_input_that_may_open_a_program_waits_for_its_window(monkeypatch, tool, args):
+    """Seen 2026-11-28 on macOS: Spotlight closed at once after the Enter, the screen then showed
+    nothing new for over a second, and verify_after called that settled before Calculator appeared."""
+    FakeVNC.frames[:] = [b"spotlight", b"desktop", b"desktop", b"desktop", b"desktop",
+                         b"calculator", b"calculator", b"calculator"]
+    monkeypatch.setattr(tools, "_session", lambda _kid: FakeVNC())
+    result = tool({"session_id": SID, "verify_after": True, **args})
+    verify = json.loads(result["content"][0]["text"])["verify_after"]
+    shown = base64.b64decode(next(p for p in result["content"] if p["type"] == "image_url")
+                             ["image_url"]["url"].split(",", 1)[1])
+    assert (shown, verify["settled"], verify["waited_seconds"]) == (b"calculator", True, 3.5)
+    assert "may still be starting" in verify["instruction"]  # a big program can take longer still
+
+
+def test_an_enter_on_a_screen_that_keeps_still_returns_at_three_seconds(monkeypatch):
+    FakeVNC.frames[:] = [b"before"]
+    monkeypatch.setattr(tools, "_session", lambda _kid: FakeVNC())
+    result = tools.kasm_key({"session_id": SID, "keys": "Return", "verify_after": True})
+    verify = json.loads(result["content"][0]["text"])["verify_after"]
+    assert (verify["settled"], verify["waited_seconds"]) == (True, 3.0)
+
+
+def test_an_enter_that_changes_nothing_gives_up_after_five_seconds(monkeypatch):
+    monkeypatch.setattr(tools, "_session", lambda _kid: FakeVNC())
+    result = tools.kasm_key({"session_id": SID, "keys": "Return", "verify_after": True})
+    verify = json.loads(result["content"][0]["text"])["verify_after"]
+    assert (verify["changed"], verify["settled"], verify["waited_seconds"]) == (False, False, 5.0)
+
+
+def test_verify_after_paste_drops_the_look_yourself_note(monkeypatch):
+    class Clipboard(FakeVNC):
+        def set_clipboard(self, text):
+            self.actions.append(("clipboard", text))
+
+    FakeVNC.frames[:] = [b"Z"]
+    monkeypatch.setattr(tools, "_session", lambda _kid: Clipboard())
+    shown = tools.kasm_paste({"session_id": SID, "text": "é", "verify_after": True})
+    assert "note" not in json.loads(shown["content"][0]["text"])
+    unseen = json.loads(tools.kasm_paste({"session_id": SID, "text": "é"}))
+    assert "check with kasm_look" in unseen["note"]
 
 
 def test_verify_after_records_the_screenshot_size_for_the_next_click(monkeypatch):
@@ -193,7 +256,7 @@ def test_verify_after_records_the_screenshot_size_for_the_next_click(monkeypatch
 
 
 @pytest.mark.parametrize(("frames", "ends_at"), [
-    ([b"A", b"A"], 1.5),                           # looks at 0.5 and 1.0, the second done at 1.5
+    ([b"Z", b"A", b"A", b"A"], 2.0),               # looks at 0.5, 1.0 and 1.5, the third done at 2.0
     ([bytes([n]) for n in range(20)], 4.0),         # never still: the last look is the one done at 4.0
 ])
 def test_verify_after_counts_the_time_each_look_takes(monkeypatch, clean_session, frames, ends_at):
@@ -202,7 +265,8 @@ def test_verify_after_counts_the_time_each_look_takes(monkeypatch, clean_session
     look = FakeVNC.screenshot
     monkeypatch.setattr(FakeVNC, "screenshot", lambda self: clean_session.sleep(0.5) or look(self))
     verify, _, _ = verified_click(monkeypatch, frames)
-    assert (clean_session.now, verify["waited_seconds"]) == (ends_at, ends_at)
+    # the look before the input took its own half second, before the wait began
+    assert (clean_session.now, verify["waited_seconds"]) == (ends_at + 0.5, ends_at)
 
 
 def test_verify_after_says_how_big_the_screen_is_now(monkeypatch):

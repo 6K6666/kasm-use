@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.11 — 2026-11-28
+
+From ChatGPT's third stress test of the three desktops.
+
+- `kasm_start` and `kasm_wait` say how far a slow launch is: `elapsed_seconds` since it began and,
+  from a controller that reports steps, `step` ("4 of 6"), `step_seconds` and `usually_seconds`, with
+  a note when a step takes much longer than usual. Windows said only "Signing in" for over two
+  minutes, and an agent could not tell a slow launch from a stuck one.
+- `verify_after` looks at the screen before sending the input and calls the screen `settled` only
+  once it has changed and then stayed still for 1 s (was 0.5 s). macOS pauses up to about a second
+  while opening a program, and an early screenshot invited the agent to send the input again. The
+  result now says `changed`; `false` means no reaction yet, so look again before repeating the input.
+  After an Enter or a double-click, which often open a program, it waits at least 3 s (about 5 s at
+  most): on macOS, Spotlight closed at once and Calculator's window came more than a second later,
+  and 1 s of stillness alone still called the empty screen settled. Each verified input takes about a
+  second longer; one that opens a program, about 3 s. No still screen proves a program has opened
+  (cold Messages and Music drew their windows after more than 3 s of stillness), so after an Enter or
+  a double-click the result also says to look again before repeating the input.
+- `kasm_paste` with `verify_after` no longer adds the note telling the agent to check with
+  `kasm_look`: the screenshot is that check.
 ## 0.5.10 — 2026-11-28
 
 Small corrections left over from the reviews of 0.5.8 and 0.5.9. No tool behaves differently.

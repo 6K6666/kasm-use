@@ -222,6 +222,58 @@ def test_wait_timeout_is_clamped_and_still_preparing_is_not_an_error(monkeypatch
     assert len(sleeps) == waited
 
 
+def publish_step(tmp_path, phase="preparing", **fields):
+    status = {"session_id": SID, "phase": phase, "detail": "Checking that Windows keeps the sign-in",
+              "typing": "ascii", "updated": STARTED - 30, "started": STARTED - 250,
+              "step": 5, "steps": 6, "usually_seconds": 90, **fields}
+    (tmp_path / f"{SID}.json").write_text(json.dumps(status))
+
+
+def test_wait_says_which_step_a_launch_is_in_and_how_long_it_usually_takes(tmp_path):
+    """Seen 2026-11-28: Windows said "Signing in" for over two minutes, and an agent could not tell
+    a normal launch from a stuck one."""
+    publish_step(tmp_path)  # the clock reads STARTED + 10
+    result = json.loads(tools.kasm_wait({"session_id": SID, "timeout_seconds": 5}))
+    assert result == {"ok": True, "session_id": SID, "state": "preparing",
+                      "detail": "Checking that Windows keeps the sign-in", "elapsed_seconds": 260,
+                      "step": "5 of 6", "step_seconds": 40, "usually_seconds": 90, "waited_seconds": 5}
+
+
+def test_wait_says_when_a_step_takes_much_longer_than_usual(tmp_path):
+    publish_step(tmp_path, updated=STARTED - 231)  # 241 s in a step that usually takes 90
+    result = json.loads(tools.kasm_wait({"session_id": SID, "timeout_seconds": 5}))
+    assert result["step_seconds"] == 241
+    assert result["note"].startswith("This step is taking much longer than usual.")
+    publish_step(tmp_path, updated=STARTED - 230)  # 240 s: not yet
+    assert "note" not in json.loads(tools.kasm_wait({"session_id": SID, "timeout_seconds": 5}))
+
+
+@pytest.mark.parametrize("fields", [
+    {"step": 7}, {"step": 0}, {"step": True}, {"step": 2.5}, {"usually_seconds": "90"},
+    {"usually_seconds": float("inf")}, {"steps": None},
+])
+def test_a_malformed_step_is_left_out_but_the_elapsed_time_stays(tmp_path, fields):
+    publish_step(tmp_path, **fields)
+    result = json.loads(tools.kasm_wait({"session_id": SID, "timeout_seconds": 5}))
+    assert result["elapsed_seconds"] == 260
+    assert not {"step", "step_seconds", "usually_seconds"} & set(result)
+    assert (result["state"], result["detail"]) == ("preparing", "Checking that Windows keeps the sign-in")
+
+
+@pytest.mark.parametrize("started", [None, "250", STARTED + 120, -1])
+def test_a_malformed_start_time_leaves_all_progress_out(tmp_path, started):
+    publish_step(tmp_path, started=started)
+    result = json.loads(tools.kasm_wait({"session_id": SID, "timeout_seconds": 5}))
+    assert not {"elapsed_seconds", "step", "step_seconds", "usually_seconds"} & set(result)
+
+
+def test_a_ready_desktop_reports_only_the_elapsed_time(monkeypatch, tmp_path):
+    publish_step(tmp_path, phase="ready", detail="")
+    result = json.loads(tools.kasm_wait({"session_id": SID}))
+    assert result == {"ok": True, "session_id": SID, "state": "ready", "detail": "", "elapsed_seconds": 260,
+                      "waited_seconds": 0}
+
+
 def test_wait_stops_at_the_wall_clock_deadline_even_when_polling_is_slow(monkeypatch, tmp_path):
     publish(tmp_path, "preparing")
     clock = iter(range(0, 10_000, 40))
@@ -348,6 +400,22 @@ def test_start_waits_for_the_controllers_first_report_and_says_queued(monkeypatc
     assert (result["state"], result["ready"], result["detail"]) == ("queued", False, detail)
     assert result["note"] == "Queued behind another session. Call kasm_wait; it starts when a slot frees."
     assert sleeps == [0.5, 0.5, 0.5]
+
+
+def test_start_reports_the_launch_step(monkeypatch, tmp_path):
+    kid = "f" * 32
+    replies = {
+        "get_images": {"images": [{"enabled": True, "friendly_name": "Windows", "name": "w:1", "image_id": IMAGE}]},
+        "request_kasm": {"kasm_id": kid, "username": "alice", "session_token": "t"},
+        "get_kasm_status": {"kasm": {"operational_status": "running"}},
+    }
+    monkeypatch.setattr(tools, "_call", lambda endpoint, **_: replies[endpoint])
+    (tmp_path / f"{kid}.json").write_text(json.dumps(
+        {"session_id": kid, "phase": "preparing", "detail": "Starting the Windows guest", "typing": "ascii",
+         "updated": STARTED + 8, "started": STARTED + 8, "step": 1, "steps": 6, "usually_seconds": 5}))
+    result = json.loads(tools.kasm_start({"workspace": "Windows"}))
+    assert {k: result[k] for k in ("state", "elapsed_seconds", "step", "step_seconds", "usually_seconds")} == {
+        "state": "preparing", "elapsed_seconds": 2, "step": "1 of 6", "step_seconds": 2, "usually_seconds": 5}
 
 
 def test_start_does_not_tell_the_caller_to_wait_for_a_session_that_already_failed(monkeypatch, tmp_path):
