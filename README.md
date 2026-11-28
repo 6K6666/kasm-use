@@ -65,7 +65,7 @@ MCP client are the most useful details.
 | `kasm_scroll` | Scroll, optionally at a point |
 | `kasm_stop` | Destroy the session. An attached session is released instead and keeps running |
 
-Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, or `kasm_scroll` to return a screenshot with the action result. It is taken once the screen has stopped changing: kasm-use looks every half second until two looks agree (a blinking cursor counts as still), for 4 seconds at most, and the result says `settled` and `waited_seconds`. A program that takes seconds to open may still appear later; call `kasm_look` for it. Inspect the screenshot to decide whether the action worked.
+Set `verify_after: true` on `kasm_click`, `kasm_drag`, `kasm_type`, `kasm_key`, or `kasm_scroll` to return a screenshot with the action result. It is taken once the screen has stopped changing: kasm-use looks every half second until two looks agree (a blinking cursor counts as still), for about 4 seconds (the look that ends the wait is not counted), and the result says `settled` and `waited_seconds`. A program that takes seconds to open may still appear later; call `kasm_look` for it. Inspect the screenshot to decide whether the action worked.
 
 What a call costs on the server (measured 2026-11-27 on an Ubuntu Noble session, 1280x800): `kasm_key` 0.1 s (ten calls, all 0.1 s), `kasm_look` 0.5 s with `wait_seconds: 0`, an input with `verify_after` 1.5 s on a still screen. Anything beyond that in a client's timings is the client's own round trip. If the screenshot is unavailable, the input may still have been sent; call `kasm_look` before retrying.
 

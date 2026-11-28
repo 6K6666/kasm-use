@@ -929,6 +929,7 @@ def kasm_start(args, **kw):
                    **detail,
                    note="Desktop is visible. Call kasm_look next." if ready
                    else "Queued behind another session. Call kasm_wait; it starts when a slot frees." if state == "queued"
+                   else "This session is not usable. Call kasm_stop, then start a new one." if state == "failed"
                    else "Desktop is still starting. Call kasm_wait.")
     except Exception as e:
         return _err(str(e))
@@ -1170,7 +1171,7 @@ _SID = {"session_id": {"type": "string",
                        "description": "A session you started or attached to. May be omitted only while you "
                                       "have a single session."}}
 
-_VERIFY = ("Return a screenshot with the result, taken once the screen has stopped changing (up to 4 s), and "
+_VERIFY = ("Return a screenshot with the result, taken once the screen has stopped changing (about 4 s at most), and "
            "the screen's size. A still screen is not a finished command: check the picture for the result.")
 
 _TOOLS = [

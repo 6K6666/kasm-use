@@ -350,6 +350,22 @@ def test_start_waits_for_the_controllers_first_report_and_says_queued(monkeypatc
     assert sleeps == [0.5, 0.5, 0.5]
 
 
+def test_start_does_not_tell_the_caller_to_wait_for_a_session_that_already_failed(monkeypatch, tmp_path):
+    kid = "f" * 32
+    replies = {
+        "get_images": {"images": [{"enabled": True, "friendly_name": "Windows", "name": "w:1", "image_id": IMAGE}]},
+        "request_kasm": {"kasm_id": kid, "username": "alice", "session_token": "t"},
+        "get_kasm_status": {"kasm": {"operational_status": "running"}},
+    }
+    monkeypatch.setattr(tools, "_call", lambda endpoint, **_: replies[endpoint])
+    (tmp_path / f"{kid}.json").write_text(json.dumps(
+        {"session_id": kid, "phase": "failed", "detail": "The Windows image did not pass its check.",
+         "typing": "ascii", "updated": STARTED}))
+    result = json.loads(tools.kasm_start({"workspace": "Windows"}))
+    assert (result["state"], result["ready"]) == ("failed", False)
+    assert result["note"] == "This session is not usable. Call kasm_stop, then start a new one."
+
+
 def test_start_reports_the_state_of_a_status_file_session_without_probing_it(monkeypatch):
     replies = {
         "get_images": {"images": [{"enabled": True, "friendly_name": "Windows", "name": "w:1", "image_id": IMAGE}]},

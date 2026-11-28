@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.10 — 2026-11-28
+
+Small corrections left over from the reviews of 0.5.8 and 0.5.9. No tool behaves differently.
+
+- `kasm_start` on a session whose status is already `failed` (for example a desktop image that did
+  not pass its check) said "Desktop is still starting. Call kasm_wait." It now says the session is
+  not usable and to stop it.
+- `verify_after` waits "about 4 s at most": the look that ends the wait is not counted, so
+  `waited_seconds` can read a little over 4.
+- The Hermes plugin's version follows the package (it still said 0.5.0).
+
 ## 0.5.9 — 2026-11-27
 
 From ChatGPT's second stress test of the three desktops.
